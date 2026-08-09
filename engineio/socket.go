@@ -2,8 +2,6 @@ package engineio
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -143,7 +141,6 @@ func (s *Socket) transportName() string {
 
 // SendMessage sends a `message` packet to the client.
 func (s *Socket) SendMessage(data []byte, binary bool) {
-	fmt.Fprintf(os.Stderr, "[s:%s] echo %q\n", s.id, data)
 	s.sendPacket(transport.Message, data, binary)
 }
 
@@ -214,11 +211,6 @@ func (s *Socket) onPacket(p *transport.Packet) {
 		onData := s.onData
 		data := p.Data
 		binary := p.IsBinary
-		tn := "?"
-		if s.transport != nil {
-			tn = s.transport.Name()
-		}
-		fmt.Fprintf(os.Stderr, "[s:%s] recv msg %q on %s\n", s.id, data, tn)
 		s.mu.Unlock()
 		if onData != nil {
 			onData(s, data, binary)
