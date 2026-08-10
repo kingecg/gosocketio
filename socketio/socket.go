@@ -79,13 +79,15 @@ func (s *Socket) send(p *Packet) {
 	s.server.sendPacket(s.ec, p)
 }
 
-// handleAck processes an acknowledgement for one of our emitted events.
+// handleAck processes an acknowledgement for one of our emitted events. The
+// callback is invoked on its own goroutine so a blocking callback does not
+// stall the ordered packet processing.
 func (s *Socket) handleAck(p *Packet) {
 	data, _ := p.Data.([]any)
 	if data == nil {
 		data = []any{}
 	}
-	s.acks.invoke(p.ID, data)
+	go s.acks.invoke(p.ID, data)
 }
 
 // JoinRoom subscribes the socket to a room.

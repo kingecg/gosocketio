@@ -226,7 +226,7 @@ func (n *namespace) disconnectSocket(s *Socket, reason string) {
 	s.setConnected(false)
 	s.acks.clear()
 	if reason == "server namespace disconnect" {
-		s.send(&Packet{Type: Disconnect, Nsp: n.name})
+		s.send(&Packet{Type: Disconnect, Nsp: n.name, ID: -1})
 	}
 	for _, h := range disc {
 		h.Call([]reflect.Value{reflect.ValueOf(s), reflect.ValueOf(reason)})

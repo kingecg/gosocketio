@@ -430,7 +430,7 @@ func TestBinaryEvent(t *testing.T) {
 	tc.recvPacket(5 * time.Second)
 
 	// craft a binary event: 1 attachment
-	pkt := &Packet{Type: BinaryEvent, Nsp: "/", Attachments: 1,
+	pkt := &Packet{Type: BinaryEvent, Nsp: "/", ID: -1, Attachments: 1,
 		Data: []any{"bin", "blob", placeholder{Placeholder: true, Num: 0}}}
 	tc.c.SendMessage(pkt.Encode(), false)
 	tc.c.SendMessage([]byte("hello"), true)
@@ -445,6 +445,141 @@ func TestBinaryEvent(t *testing.T) {
 	}
 	binary := tc.recv(5 * time.Second)
 	if !binary.binary || string(binary.data) != "hello" {
+		t.Fatalf("binary = %v %q", binary.binary, binary.data)
+	}
+}
+
+func TestBinaryEventMultiAttachment(t *testing.T) {
+	got := make(chan []byte, 2)
+	srv := newTestServer(t)
+	srv.OnEvent("/", "bin", func(s *Socket, name string, first []byte, nested map[string]any) {
+		got <- first
+		if b, ok := nested["deep"].([]byte); ok {
+			got <- b
+		}
+	})
+	ts := startTestServer(t, srv)
+
+	tc := newTestClient(t, ts.URL)
+	tc.send("0")
+	tc.recvPacket(5 * time.Second)
+
+	pkt := &Packet{Type: BinaryEvent, Nsp: "/", ID: -1, Attachments: 2,
+		Data: []any{"bin", "x", placeholder{Placeholder: true, Num: 0},
+			map[string]any{"deep": placeholder{Placeholder: true, Num: 1}}}}
+	tc.c.SendMessage(pkt.Encode(), false)
+	tc.c.SendMessage([]byte("one"), true)
+	tc.c.SendMessage([]byte("two"), true)
+
+	select {
+	case b := <-got:
+		if string(b) != "one" {
+			t.Fatalf("first = %q", b)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("first binary not delivered")
+	}
+	select {
+	case b := <-got:
+		if string(b) != "two" {
+			t.Fatalf("nested = %q", b)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("nested binary not delivered")
+	}
+}
+
+func TestBinaryAckToServer(t *testing.T) {
+	ackCh := make(chan []any, 1)
+	srv := newTestServer(t)
+	srv.OnEvent("/", "start", func(s *Socket) {
+		if _, err := s.EmitWithAck("ping?", func(args []any) {
+			ackCh <- args
+		}); err != nil {
+			t.Fatalf("emit with ack: %v", err)
+		}
+	})
+	ts := startTestServer(t, srv)
+
+	tc := newTestClient(t, ts.URL)
+	tc.send("0")
+	tc.recvPacket(5 * time.Second)
+
+	tc.send(`2["start"]`)
+	p := tc.recvPacket(5 * time.Second)
+	if p.Type != Event || p.Data.([]any)[0] != "ping?" || p.ID < 0 {
+		t.Fatalf("got %v %#v id=%d", p.Type, p.Data, p.ID)
+	}
+
+	// reply with a binary ack: 1 attachment
+	tc.sendPacket(&Packet{Type: BinaryAck, Nsp: "/", ID: p.ID, Attachments: 1,
+		Data: []any{placeholder{Placeholder: true, Num: 0}}})
+	tc.c.SendMessage([]byte("pong-binary"), true)
+
+	select {
+	case args := <-ackCh:
+		if len(args) != 1 {
+			t.Fatalf("ack args = %#v", args)
+		}
+		b, ok := args[0].([]byte)
+		if !ok || string(b) != "pong-binary" {
+			t.Fatalf("ack binary = %v %q", ok, b)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("ack callback not invoked")
+	}
+}
+
+func TestBinaryAckToClient(t *testing.T) {
+	srv := newTestServer(t)
+	srv.OnEvent("/", "ping?", func(s *Socket) []byte {
+		return []byte("pong-binary")
+	})
+	ts := startTestServer(t, srv)
+
+	tc := newTestClient(t, ts.URL)
+	tc.send("0")
+	tc.recvPacket(5 * time.Second)
+
+	tc.send(`25["ping?"]`)
+	p := tc.recvPacket(5 * time.Second)
+	if p.Type != BinaryAck || p.Attachments != 1 || p.ID != 5 {
+		t.Fatalf("got %v attachments=%d id=%d", p.Type, p.Attachments, p.ID)
+	}
+	binary := tc.recv(5 * time.Second)
+	if !binary.binary || string(binary.data) != "pong-binary" {
+		t.Fatalf("binary = %v %q", binary.binary, binary.data)
+	}
+}
+
+func TestBroadcastBinary(t *testing.T) {
+	srv := newTestServer(t)
+	srv.OnEvent("/", "share", func(s *Socket, data []byte) {
+		s.Broadcast("shared", data)
+	})
+	ts := startTestServer(t, srv)
+
+	tcA := newTestClient(t, ts.URL)
+	tcA.send("0")
+	tcA.recvPacket(5 * time.Second)
+	tcB := newTestClient(t, ts.URL)
+	tcB.send("0")
+	tcB.recvPacket(5 * time.Second)
+
+	pkt := &Packet{Type: BinaryEvent, Nsp: "/", ID: -1, Attachments: 1,
+		Data: []any{"share", placeholder{Placeholder: true, Num: 0}}}
+	tcA.c.SendMessage(pkt.Encode(), false)
+	tcA.c.SendMessage([]byte("broadcast-me"), true)
+
+	p := tcB.recvPacket(5 * time.Second)
+	if p.Type != BinaryEvent || p.Attachments != 1 {
+		t.Fatalf("got %v attachments=%d", p.Type, p.Attachments)
+	}
+	if data, ok := p.Data.([]any); !ok || data[0] != "shared" {
+		t.Fatalf("data = %#v", p.Data)
+	}
+	binary := tcB.recv(5 * time.Second)
+	if !binary.binary || string(binary.data) != "broadcast-me" {
 		t.Fatalf("binary = %v %q", binary.binary, binary.data)
 	}
 }

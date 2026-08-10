@@ -26,14 +26,15 @@ type Socket struct {
 	logger     Logger
 	remoteAddr string
 
-	mu          sync.Mutex
-	readyState  readyState
-	transport   transport.Transport
-	binding     *transportBinding
-	writeBuffer []*transport.Packet
-	upgrading   bool
-	upgraded    bool
-	sending     bool
+	mu           sync.Mutex
+	readyState   readyState
+	transport    transport.Transport
+	pollingTport transport.Transport
+	binding      *transportBinding
+	writeBuffer  []*transport.Packet
+	upgrading    bool
+	upgraded     bool
+	sending      bool
 
 	pingIntervalTimer *time.Timer
 	pingTimeoutTimer  *time.Timer
@@ -68,6 +69,17 @@ func (s *Socket) Transport() transport.Transport {
 	return s.transport
 }
 
+// pollingTransport returns the transport that served the initial HTTP
+// long-polling session, if any. It is retained after a websocket upgrade so
+// that HTTP requests still in flight (e.g. a POST carrying a message that was
+// sent just before the upgrade) are routed to a transport that can still
+// deliver the payload to the socket, matching the reference implementation.
+func (s *Socket) pollingTransport() transport.Transport {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pollingTport
+}
+
 // ReadyState returns a human readable session state.
 func (s *Socket) ReadyState() string {
 	s.mu.Lock()
@@ -94,6 +106,9 @@ func (s *Socket) attach(t transport.Transport) {
 	b := &transportBinding{socket: s, transport: t}
 	s.mu.Lock()
 	s.transport = t
+	if t.Name() == "polling" {
+		s.pollingTport = t
+	}
 	s.binding = b
 	s.mu.Unlock()
 	t.SetHandler(b)
@@ -162,7 +177,7 @@ func (s *Socket) sendPacket(t transport.Type, data []byte, binary bool) {
 func (s *Socket) flush() {
 	var reflush bool
 	s.mu.Lock()
-	if s.readyState == stateClosed || s.sending {
+	if s.readyState == stateClosed || s.sending || s.upgrading {
 		s.mu.Unlock()
 		return
 	}
@@ -371,6 +386,7 @@ func (s *Socket) MaybeUpgrade(newTransport transport.Transport) {
 
 	up := &upgradeHandler{
 		onProbe: func() {
+			s.logger.Debugf("engineio[%s]: upgrade probe received", s.id)
 			newTransport.Send([]*transport.Packet{{Type: transport.Pong, Data: []byte("probe")}})
 			// Keep the polling transport cycling while the upgrade is in
 			// flight, so no packet is lost if the upgrade fails.
@@ -402,7 +418,9 @@ func (s *Socket) MaybeUpgrade(newTransport transport.Transport) {
 			s.upgrading = false
 			s.upgraded = true
 			s.transport = newTransport
+			buffered := len(s.writeBuffer)
 			s.mu.Unlock()
+			s.logger.Debugf("engineio[%s]: upgrade confirmed, buffered=%d", s.id, buffered)
 
 			if old != nil {
 				old.Discard()
@@ -431,6 +449,8 @@ func (s *Socket) MaybeUpgrade(newTransport transport.Transport) {
 				s.pingIntervalTimer = time.AfterFunc(s.opts.PingInterval, s.pingHandler)
 			}
 			s.mu.Unlock()
+			s.flush()
+			s.logger.Debugf("engineio[%s]: upgrade aborted", s.id)
 		},
 	}
 	newTransport.SetHandler(up)

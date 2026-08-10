@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"reflect"
 	"sync"
 
 	"github.com/kingecg/gosocketio/engineio"
@@ -128,7 +129,9 @@ func (s *Server) namespaceLookup(name string) *namespace {
 }
 
 // engineConn tracks the namespace sockets multiplexed over one Engine.IO
-// connection.
+// connection. Incoming packets are fed through an ordered queue and processed
+// on a single goroutine so that a blocking event handler cannot stall the
+// transport read loop (and binary reconstruction stays ordered).
 type engineConn struct {
 	es     *engineio.Socket
 	server *Server
@@ -136,6 +139,9 @@ type engineConn struct {
 	mu      sync.Mutex
 	sockets map[string]*Socket // nsp -> socket
 	recon   *reconstructor
+
+	in      *packetQueue
+	started sync.Once
 }
 
 type reconstructor struct {
@@ -143,9 +149,62 @@ type reconstructor struct {
 	bufs [][]byte
 }
 
+// inPacket is a single Engine.IO message queued for processing.
+type inPacket struct {
+	data   []byte
+	binary bool
+}
+
+// packetQueue is an unbounded FIFO of incoming packets. Pushes never block so
+// the transport read loop keeps draining even while the processor goroutine
+// is busy running a handler.
+type packetQueue struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	items  []*inPacket
+	closed bool
+}
+
+func newPacketQueue() *packetQueue {
+	q := &packetQueue{}
+	q.cond = sync.NewCond(&q.mu)
+	return q
+}
+
+func (q *packetQueue) push(p *inPacket) {
+	q.mu.Lock()
+	if !q.closed {
+		q.items = append(q.items, p)
+	}
+	q.mu.Unlock()
+	q.cond.Signal()
+}
+
+func (q *packetQueue) pop() (*inPacket, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for len(q.items) == 0 && !q.closed {
+		q.cond.Wait()
+	}
+	if len(q.items) == 0 {
+		return nil, false
+	}
+	p := q.items[0]
+	q.items[0] = nil
+	q.items = q.items[1:]
+	return p, true
+}
+
+func (q *packetQueue) close() {
+	q.mu.Lock()
+	q.closed = true
+	q.mu.Unlock()
+	q.cond.Broadcast()
+}
+
 func (s *Server) onEngineConnect(es *engineio.Socket) {
 	s.mu.Lock()
-	s.engines[es] = &engineConn{es: es, server: s, sockets: make(map[string]*Socket)}
+	s.engines[es] = &engineConn{es: es, server: s, sockets: make(map[string]*Socket), in: newPacketQueue()}
 	s.mu.Unlock()
 }
 
@@ -154,21 +213,41 @@ func (s *Server) connFor(es *engineio.Socket) *engineConn {
 	defer s.mu.Unlock()
 	ec := s.engines[es]
 	if ec == nil {
-		ec = &engineConn{es: es, server: s, sockets: make(map[string]*Socket)}
+		ec = &engineConn{es: es, server: s, sockets: make(map[string]*Socket), in: newPacketQueue()}
 		s.engines[es] = ec
 	}
 	return ec
 }
 
+// start launches the per-connection processing goroutine on first use.
+func (ec *engineConn) start() {
+	ec.started.Do(func() { go ec.processLoop() })
+}
+
+func (ec *engineConn) processLoop() {
+	for {
+		p, ok := ec.in.pop()
+		if !ok {
+			return
+		}
+		ec.handleIn(p.data, p.binary)
+	}
+}
+
 func (s *Server) onEngineData(es *engineio.Socket, data []byte, binary bool) {
 	ec := s.connFor(es)
+	ec.start()
+	ec.in.push(&inPacket{data: data, binary: binary})
+}
+
+func (ec *engineConn) handleIn(data []byte, binary bool) {
 	if binary {
 		ec.feedBinary(data)
 		return
 	}
 	pkt, err := Decode(data)
 	if err != nil {
-		s.logger.Debugf("socketio: decode error: %v", err)
+		ec.server.logger.Debugf("socketio: decode error: %v", err)
 		return
 	}
 	if pkt.Type == BinaryEvent || pkt.Type == BinaryAck {
@@ -177,35 +256,27 @@ func (s *Server) onEngineData(es *engineio.Socket, data []byte, binary bool) {
 			ec.process(pkt)
 			return
 		}
-		ec.mu.Lock()
 		ec.recon = &reconstructor{pkt: pkt}
-		ec.mu.Unlock()
 		return
 	}
 	ec.process(pkt)
 }
 
 func (ec *engineConn) feedBinary(data []byte) {
-	ec.mu.Lock()
 	rec := ec.recon
 	if rec == nil {
-		ec.mu.Unlock()
 		ec.server.logger.Debugf("socketio: unexpected binary data")
 		return
 	}
 	rec.bufs = append(rec.bufs, data)
-	done := len(rec.bufs) == rec.pkt.Attachments
-	if done {
-		ec.recon = nil
+	if len(rec.bufs) != rec.pkt.Attachments {
+		return
 	}
-	ec.mu.Unlock()
-
-	if done {
-		pkt := *rec.pkt
-		pkt.Data = reconstruct(pkt.Data, rec.bufs)
-		pkt.Type = binaryToPlain(pkt.Type)
-		ec.process(&pkt)
-	}
+	ec.recon = nil
+	pkt := *rec.pkt
+	pkt.Data = reconstruct(pkt.Data, rec.bufs)
+	pkt.Type = binaryToPlain(pkt.Type)
+	ec.process(&pkt)
 }
 
 func binaryToPlain(t PacketType) PacketType {
@@ -277,7 +348,7 @@ func (s *Server) handleConnect(ec *engineConn, pkt *Packet) {
 		s.rejectConnect(ec, sock, ns, err.Error())
 		return
 	}
-	s.sendPacket(ec, &Packet{Type: Connect, Nsp: nsp, Data: map[string]any{"sid": sock.id}})
+	s.sendPacket(ec, &Packet{Type: Connect, Nsp: nsp, ID: -1, Data: map[string]any{"sid": sock.id}})
 }
 
 func (s *Server) rejectConnect(ec *engineConn, sock *Socket, ns *namespace, msg string) {
@@ -291,7 +362,7 @@ func (s *Server) rejectConnect(ec *engineConn, sock *Socket, ns *namespace, msg 
 }
 
 func (ec *engineConn) sendConnectError(nsp, msg string) {
-	ec.server.sendPacket(ec, &Packet{Type: ConnectError, Nsp: nsp, Data: map[string]any{"message": msg}})
+	ec.server.sendPacket(ec, &Packet{Type: ConnectError, Nsp: nsp, ID: -1, Data: map[string]any{"message": msg}})
 }
 
 func (s *Server) handleDisconnect(ec *engineConn, pkt *Packet) {
@@ -321,15 +392,30 @@ func (s *Server) handleEvent(ec *engineConn, pkt *Packet) {
 	}
 	args := data[1:]
 
+	// Handlers run on their own goroutines so a handler that blocks (for
+	// example waiting for a round-trip acknowledgement) does not stall the
+	// ordered packet processing for this connection.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	var results []any
 	for _, h := range sock.nsp.handlersFor(name) {
-		results = append(results, invokeHandler(h, sock, args)...)
+		wg.Add(1)
+		go func(h reflect.Value) {
+			defer wg.Done()
+			res := invokeHandler(h, sock, args)
+			mu.Lock()
+			results = append(results, res...)
+			mu.Unlock()
+		}(h)
 	}
 	if pkt.ID >= 0 {
-		if results == nil {
-			results = []any{}
-		}
-		sock.send(&Packet{Type: Ack, Nsp: pkt.Nsp, ID: pkt.ID, Data: results})
+		go func() {
+			wg.Wait()
+			if results == nil {
+				results = []any{}
+			}
+			sock.send(&Packet{Type: Ack, Nsp: pkt.Nsp, ID: pkt.ID, Data: results})
+		}()
 	}
 }
 
@@ -351,6 +437,7 @@ func (s *Server) onEngineClose(es *engineio.Socket, reason string, _ error) {
 	if ec == nil {
 		return
 	}
+	ec.in.close()
 	ec.mu.Lock()
 	sockets := make([]*Socket, 0, len(ec.sockets))
 	for _, sock := range ec.sockets {

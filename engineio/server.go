@@ -137,6 +137,16 @@ func (s *Server) handlePolling(w http.ResponseWriter, r *http.Request, q url.Val
 		p.ServeHTTP(w, r)
 		return
 	}
+	// A message POSTed over polling just before a websocket upgrade may reach
+	// the server after the active transport has switched. Route it to the
+	// retained polling transport so the payload still reaches the socket
+	// (which forwards replies over the now-active transport).
+	if pt := sock.pollingTransport(); pt != nil {
+		if hp, ok := pt.(transport.HTTPServing); ok {
+			hp.ServeHTTP(w, r)
+			return
+		}
+	}
 	s.abortRequest(w, ErrCodeBadRequest, nil)
 }
 
@@ -267,12 +277,12 @@ func (s *Server) verify(r *http.Request, q url.Values, upgrade bool) error {
 
 func (s *Server) upgradesFor(transportName string) []string {
 	if !s.Options.AllowUpgrades {
-		return nil
+		return []string{}
 	}
 	if transportName == "polling" && s.Options.transportsEnabled()["websocket"] {
 		return []string{"websocket"}
 	}
-	return nil
+	return []string{}
 }
 
 func (s *Server) generateID(r *http.Request) string {

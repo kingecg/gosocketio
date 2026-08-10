@@ -23,10 +23,13 @@ type clientPolling struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu       sync.Mutex
-	closed   bool
-	paused   bool
-	pollOnce sync.Once
+	mu           sync.Mutex
+	closed       bool
+	paused       bool
+	pauseCh      chan struct{}
+	inflight     int
+	inflightCond *sync.Cond
+	pollOnce     sync.Once
 }
 
 func (p *clientPolling) Name() string { return "polling" }
@@ -40,12 +43,18 @@ func (p *clientPolling) SetHandler(h transport.Handler) {
 	p.pollOnce.Do(func() { go p.pollLoop() })
 }
 
-// pause stops the polling loop once the current poll request returns. It is
-// used during a transport upgrade so that no further GET requests are issued
-// over the outgoing transport.
+// pause blocks the polling loop from issuing new GET requests. It is used
+// during a transport upgrade so that no further polls are made over the
+// outgoing transport. The loop blocks (rather than exiting) so a failed
+// upgrade can resume polling. In-flight requests are drained first so that a
+// POST that was already sent cannot reach the server after the transport
+// switch (the reference client behaves the same way).
 func (p *clientPolling) pause() {
 	p.mu.Lock()
 	p.paused = true
+	for p.inflight > 0 {
+		p.inflightCond.Wait()
+	}
 	p.mu.Unlock()
 }
 
@@ -61,7 +70,13 @@ func (p *clientPolling) stopForUpgrade() {
 // resume re-enables the polling loop after a failed upgrade attempt.
 func (p *clientPolling) resume() {
 	p.mu.Lock()
+	if !p.paused {
+		p.mu.Unlock()
+		return
+	}
 	p.paused = false
+	close(p.pauseCh)
+	p.pauseCh = make(chan struct{})
 	p.mu.Unlock()
 }
 
@@ -74,7 +89,16 @@ func (p *clientPolling) Send(pkts []*transport.Packet) {
 		return
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=UTF-8")
+	p.mu.Lock()
+	p.inflight++
+	p.mu.Unlock()
 	resp, err := p.httpClient.Do(req)
+	p.mu.Lock()
+	p.inflight--
+	if p.inflight == 0 {
+		p.inflightCond.Broadcast()
+	}
+	p.mu.Unlock()
 	if err != nil {
 		if p.ctx.Err() != nil {
 			return // closed
@@ -96,9 +120,18 @@ func (p *clientPolling) pollLoop() {
 		p.mu.Lock()
 		closed := p.closed
 		paused := p.paused
+		ch := p.pauseCh
 		p.mu.Unlock()
-		if closed || paused {
+		if closed {
 			return
+		}
+		if paused {
+			select {
+			case <-ch:
+				continue
+			case <-p.ctx.Done():
+				return
+			}
 		}
 		if p.ctx.Err() != nil {
 			return
@@ -110,7 +143,16 @@ func (p *clientPolling) pollLoop() {
 			p.handler.OnError(err)
 			return
 		}
+		p.mu.Lock()
+		p.inflight++
+		p.mu.Unlock()
 		resp, err := p.httpClient.Do(req)
+		p.mu.Lock()
+		p.inflight--
+		if p.inflight == 0 {
+			p.inflightCond.Broadcast()
+		}
+		p.mu.Unlock()
 		if err != nil {
 			if p.ctx.Err() != nil {
 				return

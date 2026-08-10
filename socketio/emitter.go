@@ -63,9 +63,14 @@ func invokeHandler(h reflect.Value, s *Socket, args []any) []any {
 }
 
 // convertArg converts a decoded JSON value into the handler parameter type via
-// a JSON round trip. An interface{} parameter receives the value as-is.
+// a JSON round trip. Container types receive the decoded value as-is so that
+// nested []byte values survive the dispatch unchanged.
 func convertArg(v any, t reflect.Type) (reflect.Value, bool) {
 	if t == reflect.TypeOf((*any)(nil)).Elem() {
+		return reflect.ValueOf(v), true
+	}
+	switch t {
+	case reflect.TypeOf(map[string]any(nil)), reflect.TypeOf([]any(nil)):
 		return reflect.ValueOf(v), true
 	}
 	b, err := json.Marshal(v)

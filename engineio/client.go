@@ -169,7 +169,9 @@ func (c *Client) dialPolling(ctx context.Context) {
 		httpClient: &http.Client{},
 		u:          &u,
 		sid:        c.SID,
+		pauseCh:    make(chan struct{}),
 	}
+	p.inflightCond = sync.NewCond(&p.mu)
 	p.ctx, p.cancel = context.WithCancel(ctx)
 	c.mu.Lock()
 	c.tport = p
@@ -315,6 +317,7 @@ func (c *Client) upgradeToWebsocket() {
 	}
 
 	if err := conn.Write(ctx, websocket.MessageText, []byte("2probe")); err != nil {
+		c.logger.Debugf("engineio: upgrade probe write failed: %v", err)
 		_ = conn.CloseNow()
 		fail()
 		return
@@ -331,9 +334,12 @@ func (c *Client) upgradeToWebsocket() {
 		}
 		if typ == websocket.MessageText && string(data) == "3probe" {
 			probeOK = true
+		} else {
+			c.logger.Debugf("engineio: upgrade probe got unexpected %q", data)
 		}
 	}
 	if err := conn.Write(ctx, websocket.MessageText, []byte("5")); err != nil {
+		c.logger.Debugf("engineio: upgrade write failed: %v", err)
 		_ = conn.CloseNow()
 		fail()
 		return
@@ -360,7 +366,7 @@ func (c *Client) upgradeToWebsocket() {
 	}
 	wt.SetHandler(&clientBinding{client: c, transport: wt})
 	c.flushSends()
-	c.logger.Debugf("engineio: upgraded to websocket")
+	c.logger.Debugf("engineio[%s]: upgraded to websocket", c.sid)
 }
 
 func (c *Client) sendPacket(t transport.Type, data []byte, binary bool) {

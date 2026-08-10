@@ -37,6 +37,7 @@ type Polling struct {
 	dataReq  *http.Request       // active POST request
 
 	writable     bool
+	sendBuffer   []*Packet // packets awaiting a poll request
 	discarded    bool
 	closed       bool
 	pendingClose bool
@@ -115,6 +116,11 @@ func (p *Polling) onPollRequest(w http.ResponseWriter, r *http.Request) {
 	done := make(chan struct{})
 	p.pollDone = done
 	h := p.handler
+	var buffered []*Packet
+	if !p.closed && len(p.sendBuffer) > 0 {
+		buffered = p.sendBuffer
+		p.sendBuffer = nil
+	}
 	p.mu.Unlock()
 
 	// Detect a prematurely closed poll connection and unblock on close.
@@ -126,6 +132,7 @@ func (p *Polling) onPollRequest(w http.ResponseWriter, r *http.Request) {
 				p.req = nil
 				p.res = nil
 				p.pollDone = nil
+				p.writable = false
 				p.mu.Unlock()
 				close(done)
 				if h != nil {
@@ -140,6 +147,12 @@ func (p *Polling) onPollRequest(w http.ResponseWriter, r *http.Request) {
 
 	if h != nil {
 		h.OnReady()
+	}
+
+	if len(buffered) > 0 {
+		p.Send(buffered)
+		<-done
+		return
 	}
 
 	p.mu.Lock()
@@ -229,7 +242,11 @@ func (p *Polling) Send(pkts []*Packet) {
 	res := p.res
 	done := p.pollDone
 	if res == nil {
-		// No poll request pending; nothing can be delivered right now.
+		// No poll request pending; hold the packets for the next poll so
+		// nothing is silently dropped (e.g. a reply raced with the upgrade).
+		if len(pkts) > 0 {
+			p.sendBuffer = append(p.sendBuffer, pkts...)
+		}
 		p.mu.Unlock()
 		return
 	}
@@ -310,6 +327,7 @@ func (p *Polling) closeLocked() Handler {
 	p.req = nil
 	p.res = nil
 	p.dataReq = nil
+	p.sendBuffer = nil
 	if p.closeTimer != nil {
 		p.closeTimer.Stop()
 		p.closeTimer = nil

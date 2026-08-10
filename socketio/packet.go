@@ -78,7 +78,7 @@ func (p *Packet) Encode() []byte {
 		b = append(b, p.Nsp...)
 		b = append(b, ',')
 	}
-	if p.ID > 0 {
+	if p.ID >= 0 {
 		b = append(b, strconv.FormatInt(p.ID, 10)...)
 	}
 	if p.Data != nil {

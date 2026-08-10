@@ -267,7 +267,7 @@ func TestConcurrentEcho(t *testing.T) {
 						return
 					}
 				case <-time.After(5 * time.Second):
-					t.Errorf("client %d timeout", i)
+					t.Errorf("client %d timeout (sid=%s)", i, c.SID())
 					return
 				}
 			}
