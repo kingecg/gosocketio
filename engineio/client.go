@@ -82,6 +82,7 @@ func Dial(ctx context.Context, rawURL string, opts *Options) (*Client, error) {
 
 	select {
 	case <-ctx.Done():
+		c.Close()
 		return nil, ctx.Err()
 	case err := <-c.handshakeDone:
 		if err != nil {
@@ -93,6 +94,8 @@ func Dial(ctx context.Context, rawURL string, opts *Options) (*Client, error) {
 
 // SetLogger sets the client logger.
 func (c *Client) SetLogger(l Logger) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if l != nil {
 		c.logger = l
 	}
@@ -172,7 +175,9 @@ func (c *Client) dialPolling(ctx context.Context) {
 		pauseCh:    make(chan struct{}),
 	}
 	p.inflightCond = sync.NewCond(&p.mu)
-	p.ctx, p.cancel = context.WithCancel(ctx)
+	// The transport outlives the Dial context: its lifecycle is tied to the
+	// session (Close), not the initial connect attempt.
+	p.ctx, p.cancel = context.WithCancel(context.Background())
 	c.mu.Lock()
 	c.tport = p
 	c.mu.Unlock()
@@ -192,7 +197,9 @@ func (c *Client) dialWebsocket(ctx context.Context) error {
 		return err
 	}
 	wt := &clientWebsocket{conn: conn}
-	wt.ctx, wt.cancel = context.WithCancel(ctx)
+	// The transport outlives the Dial context: its lifecycle is tied to the
+	// session (Close), not the initial connect attempt.
+	wt.ctx, wt.cancel = context.WithCancel(context.Background())
 	c.mu.Lock()
 	c.tport = wt
 	c.mu.Unlock()
@@ -272,6 +279,7 @@ func (c *Client) upgradeToWebsocket() {
 	c.mu.Lock()
 	sid := c.sid
 	tport := c.tport
+	logger := c.logger
 	c.mu.Unlock()
 	if sid == "" {
 		return
@@ -311,13 +319,13 @@ func (c *Client) upgradeToWebsocket() {
 
 	conn, _, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
-		c.logger.Debugf("engineio: upgrade dial failed: %v", err)
+		logger.Debugf("engineio: upgrade dial failed: %v", err)
 		fail()
 		return
 	}
 
 	if err := conn.Write(ctx, websocket.MessageText, []byte("2probe")); err != nil {
-		c.logger.Debugf("engineio: upgrade probe write failed: %v", err)
+		logger.Debugf("engineio: upgrade probe write failed: %v", err)
 		_ = conn.CloseNow()
 		fail()
 		return
@@ -327,7 +335,7 @@ func (c *Client) upgradeToWebsocket() {
 	for !probeOK {
 		typ, data, err := conn.Read(ctx)
 		if err != nil {
-			c.logger.Debugf("engineio: upgrade probe read failed: %v", err)
+			logger.Debugf("engineio: upgrade probe read failed: %v", err)
 			_ = conn.CloseNow()
 			fail()
 			return
@@ -335,11 +343,11 @@ func (c *Client) upgradeToWebsocket() {
 		if typ == websocket.MessageText && string(data) == "3probe" {
 			probeOK = true
 		} else {
-			c.logger.Debugf("engineio: upgrade probe got unexpected %q", data)
+			logger.Debugf("engineio: upgrade probe got unexpected %q", data)
 		}
 	}
 	if err := conn.Write(ctx, websocket.MessageText, []byte("5")); err != nil {
-		c.logger.Debugf("engineio: upgrade write failed: %v", err)
+		logger.Debugf("engineio: upgrade write failed: %v", err)
 		_ = conn.CloseNow()
 		fail()
 		return
@@ -366,7 +374,7 @@ func (c *Client) upgradeToWebsocket() {
 	}
 	wt.SetHandler(&clientBinding{client: c, transport: wt})
 	c.flushSends()
-	c.logger.Debugf("engineio[%s]: upgraded to websocket", c.sid)
+	logger.Debugf("engineio[%s]: upgraded to websocket", c.sid)
 }
 
 func (c *Client) sendPacket(t transport.Type, data []byte, binary bool) {
@@ -449,11 +457,12 @@ func (c *Client) closeWithError(err error) {
 func (c *Client) onErrorFrom(t transport.Transport, err error) {
 	c.mu.Lock()
 	active := c.tport == t
+	logger := c.logger
 	c.mu.Unlock()
 	if !active {
 		return
 	}
-	c.logger.Debugf("engineio: transport error: %v", err)
+	logger.Debugf("engineio: transport error: %v", err)
 	c.closeWithError(err)
 }
 

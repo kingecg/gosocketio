@@ -277,6 +277,18 @@ func (p *Polling) Send(pkts []*Packet) {
 	}
 }
 
+// DrainBuffered returns and clears the packets buffered while no poll
+// request was pending. It is used during a transport upgrade so that replies
+// that were produced before the switch are delivered over the new transport
+// instead of being dropped when the old one is discarded.
+func (p *Polling) DrainBuffered() []*Packet {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	buf := p.sendBuffer
+	p.sendBuffer = nil
+	return buf
+}
+
 // Discard marks the transport as discarded, so Close will not attempt to
 // deliver a close packet.
 func (p *Polling) Discard() {

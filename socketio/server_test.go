@@ -212,7 +212,7 @@ func TestConnectAndEventEcho(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0")
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != Connect {
 		t.Fatalf("expected connect, got %v", p.Type)
 	}
@@ -222,7 +222,7 @@ func TestConnectAndEventEcho(t *testing.T) {
 	}
 
 	tc.send(`2["echo","hi"]`)
-	p = tc.recvPacket(5 * time.Second)
+	p = tc.recvPacket(testWait)
 	if p.Type != Event || !reflect.DeepEqual(p.Data, []any{"echoed", "hi"}) {
 		t.Fatalf("got %v %#v", p.Type, p.Data)
 	}
@@ -237,13 +237,13 @@ func TestWebsocketTransport(t *testing.T) {
 
 	tc := newTestClientOpts(t, ts.URL, &engineio.Options{Transports: []string{"websocket"}})
 	tc.send("0")
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != Connect {
 		t.Fatalf("expected connect, got %v", p.Type)
 	}
 
 	tc.send(`21["echo","ws"]`)
-	p = tc.recvPacket(5 * time.Second)
+	p = tc.recvPacket(testWait)
 	if p.Type != Ack || p.ID != 1 || !reflect.DeepEqual(p.Data, []any{"ack:ws"}) {
 		t.Fatalf("got %v %#v", p.Type, p.Data)
 	}
@@ -258,10 +258,10 @@ func TestEventAck(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0")
-	tc.recvPacket(5 * time.Second)
+	tc.recvPacket(testWait)
 
 	tc.send(`21["double",21]`)
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != Ack || p.ID != 1 {
 		t.Fatalf("got %v id=%d", p.Type, p.ID)
 	}
@@ -276,10 +276,10 @@ func TestAckWithoutHandler(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0")
-	tc.recvPacket(5 * time.Second)
+	tc.recvPacket(testWait)
 
 	tc.send(`25["nobody"]`)
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != Ack || p.ID != 5 {
 		t.Fatalf("got %v id=%d", p.Type, p.ID)
 	}
@@ -297,13 +297,13 @@ func TestNamespace(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0/admin,")
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != Connect || p.Nsp != "/admin" {
 		t.Fatalf("got %v nsp=%q", p.Type, p.Nsp)
 	}
 
 	tc.send(`2/admin,7["ping","x"]`)
-	p = tc.recvPacket(5 * time.Second)
+	p = tc.recvPacket(testWait)
 	if p.Type != Ack || p.Nsp != "/admin" || p.ID != 7 {
 		t.Fatalf("got %v nsp=%q id=%d", p.Type, p.Nsp, p.ID)
 	}
@@ -318,7 +318,7 @@ func TestUnknownNamespaceRejected(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0/nope,")
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != ConnectError || p.Nsp != "/nope" {
 		t.Fatalf("got %v nsp=%q", p.Type, p.Nsp)
 	}
@@ -339,7 +339,7 @@ func TestMiddlewareReject(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send(`0{"token":"bad"}`)
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != ConnectError {
 		t.Fatalf("got %v", p.Type)
 	}
@@ -357,7 +357,7 @@ func TestOnConnectReject(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0")
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != ConnectError {
 		t.Fatalf("got %v", p.Type)
 	}
@@ -376,16 +376,16 @@ func TestRoomBroadcast(t *testing.T) {
 
 	clientA := newTestClient(t, ts.URL)
 	clientA.send("0")
-	clientA.recvPacket(5 * time.Second)
+	clientA.recvPacket(testWait)
 	clientB := newTestClient(t, ts.URL)
 	clientB.send("0")
-	clientB.recvPacket(5 * time.Second)
+	clientB.recvPacket(testWait)
 
 	// Each client joins room1 and waits for the server to confirm, so the
 	// membership is registered before the broadcast happens.
 	for i, tc := range []*testClient{clientA, clientB} {
 		tc.send(`2` + string(rune('1'+i)) + `["join","room1"]`)
-		p := tc.recvPacket(5 * time.Second)
+		p := tc.recvPacket(testWait)
 		if p.Type != Ack || !reflect.DeepEqual(p.Data, []any{"ok"}) {
 			t.Fatalf("join ack got %v %#v", p.Type, p.Data)
 		}
@@ -393,7 +393,7 @@ func TestRoomBroadcast(t *testing.T) {
 	clientA.send(`2["msg","room1","hello"]`)
 
 	// B must receive the broadcast; A (the sender) must not.
-	p := clientB.recvPacket(5 * time.Second)
+	p := clientB.recvPacket(testWait)
 	if !reflect.DeepEqual(p.Data, []any{"chat", "hello"}) {
 		t.Fatalf("B got %#v", p.Data)
 	}
@@ -410,9 +410,9 @@ func TestServerBroadcastToNamespace(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0")
-	tc.recvPacket(5 * time.Second)
+	tc.recvPacket(testWait)
 
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != Event || p.Data.([]any)[0] != "online" {
 		t.Fatalf("got %v %#v", p.Type, p.Data)
 	}
@@ -427,7 +427,7 @@ func TestBinaryEvent(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0")
-	tc.recvPacket(5 * time.Second)
+	tc.recvPacket(testWait)
 
 	// craft a binary event: 1 attachment
 	pkt := &Packet{Type: BinaryEvent, Nsp: "/", ID: -1, Attachments: 1,
@@ -435,7 +435,7 @@ func TestBinaryEvent(t *testing.T) {
 	tc.c.SendMessage(pkt.Encode(), false)
 	tc.c.SendMessage([]byte("hello"), true)
 
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != BinaryEvent || p.Attachments != 1 {
 		t.Fatalf("got %v attachments=%d", p.Type, p.Attachments)
 	}
@@ -443,7 +443,7 @@ func TestBinaryEvent(t *testing.T) {
 	if !ok || data[0] != "bin2" || data[1] != "blob" {
 		t.Fatalf("data = %#v", p.Data)
 	}
-	binary := tc.recv(5 * time.Second)
+	binary := tc.recv(testWait)
 	if !binary.binary || string(binary.data) != "hello" {
 		t.Fatalf("binary = %v %q", binary.binary, binary.data)
 	}
@@ -462,7 +462,7 @@ func TestBinaryEventMultiAttachment(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0")
-	tc.recvPacket(5 * time.Second)
+	tc.recvPacket(testWait)
 
 	pkt := &Packet{Type: BinaryEvent, Nsp: "/", ID: -1, Attachments: 2,
 		Data: []any{"bin", "x", placeholder{Placeholder: true, Num: 0},
@@ -476,7 +476,7 @@ func TestBinaryEventMultiAttachment(t *testing.T) {
 		if string(b) != "one" {
 			t.Fatalf("first = %q", b)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatalf("first binary not delivered")
 	}
 	select {
@@ -484,7 +484,7 @@ func TestBinaryEventMultiAttachment(t *testing.T) {
 		if string(b) != "two" {
 			t.Fatalf("nested = %q", b)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatalf("nested binary not delivered")
 	}
 }
@@ -503,10 +503,10 @@ func TestBinaryAckToServer(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0")
-	tc.recvPacket(5 * time.Second)
+	tc.recvPacket(testWait)
 
 	tc.send(`2["start"]`)
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != Event || p.Data.([]any)[0] != "ping?" || p.ID < 0 {
 		t.Fatalf("got %v %#v id=%d", p.Type, p.Data, p.ID)
 	}
@@ -525,7 +525,7 @@ func TestBinaryAckToServer(t *testing.T) {
 		if !ok || string(b) != "pong-binary" {
 			t.Fatalf("ack binary = %v %q", ok, b)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatalf("ack callback not invoked")
 	}
 }
@@ -539,14 +539,14 @@ func TestBinaryAckToClient(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0")
-	tc.recvPacket(5 * time.Second)
+	tc.recvPacket(testWait)
 
 	tc.send(`25["ping?"]`)
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != BinaryAck || p.Attachments != 1 || p.ID != 5 {
 		t.Fatalf("got %v attachments=%d id=%d", p.Type, p.Attachments, p.ID)
 	}
-	binary := tc.recv(5 * time.Second)
+	binary := tc.recv(testWait)
 	if !binary.binary || string(binary.data) != "pong-binary" {
 		t.Fatalf("binary = %v %q", binary.binary, binary.data)
 	}
@@ -561,24 +561,24 @@ func TestBroadcastBinary(t *testing.T) {
 
 	tcA := newTestClient(t, ts.URL)
 	tcA.send("0")
-	tcA.recvPacket(5 * time.Second)
+	tcA.recvPacket(testWait)
 	tcB := newTestClient(t, ts.URL)
 	tcB.send("0")
-	tcB.recvPacket(5 * time.Second)
+	tcB.recvPacket(testWait)
 
 	pkt := &Packet{Type: BinaryEvent, Nsp: "/", ID: -1, Attachments: 1,
 		Data: []any{"share", placeholder{Placeholder: true, Num: 0}}}
 	tcA.c.SendMessage(pkt.Encode(), false)
 	tcA.c.SendMessage([]byte("broadcast-me"), true)
 
-	p := tcB.recvPacket(5 * time.Second)
+	p := tcB.recvPacket(testWait)
 	if p.Type != BinaryEvent || p.Attachments != 1 {
 		t.Fatalf("got %v attachments=%d", p.Type, p.Attachments)
 	}
 	if data, ok := p.Data.([]any); !ok || data[0] != "shared" {
 		t.Fatalf("data = %#v", p.Data)
 	}
-	binary := tcB.recv(5 * time.Second)
+	binary := tcB.recv(testWait)
 	if !binary.binary || string(binary.data) != "broadcast-me" {
 		t.Fatalf("binary = %v %q", binary.binary, binary.data)
 	}
@@ -599,10 +599,10 @@ func TestEmitWithAck(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0")
-	tc.recvPacket(5 * time.Second)
+	tc.recvPacket(testWait)
 
 	tc.send(`2["start"]`)
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != Event || p.Data.([]any)[0] != "ping?" || p.ID < 0 {
 		t.Fatalf("got %v %#v id=%d", p.Type, p.Data, p.ID)
 	}
@@ -613,7 +613,7 @@ func TestEmitWithAck(t *testing.T) {
 		if len(args) != 1 || args[0] != "pong" {
 			t.Fatalf("ack args = %#v", args)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatalf("ack callback not invoked")
 	}
 }
@@ -628,7 +628,7 @@ func TestClientDisconnect(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0")
-	tc.recvPacket(5 * time.Second)
+	tc.recvPacket(testWait)
 
 	tc.send("1")
 	select {
@@ -636,7 +636,7 @@ func TestClientDisconnect(t *testing.T) {
 		if reason != "client namespace disconnect" {
 			t.Fatalf("reason = %q", reason)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatalf("disconnect not fired")
 	}
 }
@@ -654,7 +654,7 @@ func TestTransportCloseDisconnect(t *testing.T) {
 	// after the ping timeout).
 	tc := newTestClientOpts(t, ts.URL, &engineio.Options{Transports: []string{"websocket"}})
 	tc.send("0")
-	tc.recvPacket(5 * time.Second)
+	tc.recvPacket(testWait)
 
 	tc.c.Close()
 	select {
@@ -662,7 +662,7 @@ func TestTransportCloseDisconnect(t *testing.T) {
 		if reason != "transport close" && reason != "transport error" {
 			t.Fatalf("reason = %q", reason)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatalf("disconnect not fired")
 	}
 }
@@ -681,10 +681,10 @@ func TestServerInitiatedDisconnect(t *testing.T) {
 
 	tc := newTestClient(t, ts.URL)
 	tc.send("0")
-	tc.recvPacket(5 * time.Second)
+	tc.recvPacket(testWait)
 
 	tc.send(`2["kick"]`)
-	p := tc.recvPacket(5 * time.Second)
+	p := tc.recvPacket(testWait)
 	if p.Type != Disconnect {
 		t.Fatalf("expected disconnect packet, got %v", p.Type)
 	}
@@ -702,7 +702,7 @@ func TestConcurrentSockets(t *testing.T) {
 	for i := 0; i < n; i++ {
 		c := newTestClient(t, ts.URL)
 		c.send("0")
-		if p := c.recvPacket(5 * time.Second); p.Type != Connect {
+		if p := c.recvPacket(testWait); p.Type != Connect {
 			t.Fatalf("client %d: got %v", i, p.Type)
 		}
 		clients = append(clients, c)
@@ -712,7 +712,7 @@ func TestConcurrentSockets(t *testing.T) {
 		c.send("2" + payload)
 	}
 	for i, c := range clients {
-		p := c.recvPacket(5 * time.Second)
+		p := c.recvPacket(testWait)
 		if p.Type != Event {
 			t.Fatalf("client %d: got %v", i, p.Type)
 		}

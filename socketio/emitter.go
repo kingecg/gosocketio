@@ -42,6 +42,44 @@ func invokeHandler(h reflect.Value, s *Socket, args []any) []any {
 	}
 
 	outs := h.Call(in)
+	return collectResults(outs)
+}
+
+// invokeClientHandler calls a client-side event handler with the decoded event
+// arguments. Unlike invokeHandler there is no *Socket first parameter, so the
+// first handler parameter maps to the first event argument. Return values are
+// collected as the acknowledgement payload.
+//
+// Supported signatures:
+//
+//	func()
+//	func(a string)
+//	func(a int, b map[string]any)
+//	func(a *T)
+//	... with zero or more return values used as the ack payload.
+func invokeClientHandler(h reflect.Value, args []any) []any {
+	ht := h.Type()
+	numIn := ht.NumIn()
+	in := make([]reflect.Value, numIn)
+	for i := 0; i < numIn; i++ {
+		if i < len(args) {
+			v, ok := convertArg(args[i], ht.In(i))
+			if !ok {
+				return nil
+			}
+			in[i] = v
+		} else {
+			in[i] = reflect.Zero(ht.In(i))
+		}
+	}
+	outs := h.Call(in)
+	return collectResults(outs)
+}
+
+// collectResults flattens a handler's return values into an acknowledgement
+// payload, skipping nil interfaces, nil errors and treating non-nil errors as
+// their message string.
+func collectResults(outs []reflect.Value) []any {
 	var result []any
 	for _, o := range outs {
 		if !o.IsValid() {

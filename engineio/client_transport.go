@@ -27,7 +27,8 @@ type clientPolling struct {
 	closed       bool
 	paused       bool
 	pauseCh      chan struct{}
-	inflight     int
+	inflight     int // in-flight GET polls
+	sendInflight int // in-flight POST sends
 	inflightCond *sync.Cond
 	pollOnce     sync.Once
 }
@@ -43,16 +44,17 @@ func (p *clientPolling) SetHandler(h transport.Handler) {
 	p.pollOnce.Do(func() { go p.pollLoop() })
 }
 
-// pause blocks the polling loop from issuing new GET requests. It is used
-// during a transport upgrade so that no further polls are made over the
-// outgoing transport. The loop blocks (rather than exiting) so a failed
-// upgrade can resume polling. In-flight requests are drained first so that a
-// POST that was already sent cannot reach the server after the transport
-// switch (the reference client behaves the same way).
+// pause blocks the polling loop from issuing new requests. It is used during
+// a transport upgrade so that no further polls are made over the outgoing
+// transport. Only in-flight POST sends are drained: a pending GET long-poll is
+// deliberately left running (the server answers it with noop packets once the
+// upgrade probe arrives), otherwise the upgrade would deadlock against an idle
+// connection. The loop blocks (rather than exiting) so a failed upgrade can
+// resume polling.
 func (p *clientPolling) pause() {
 	p.mu.Lock()
 	p.paused = true
-	for p.inflight > 0 {
+	for p.sendInflight > 0 {
 		p.inflightCond.Wait()
 	}
 	p.mu.Unlock()
@@ -90,12 +92,12 @@ func (p *clientPolling) Send(pkts []*transport.Packet) {
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=UTF-8")
 	p.mu.Lock()
-	p.inflight++
+	p.sendInflight++
 	p.mu.Unlock()
 	resp, err := p.httpClient.Do(req)
 	p.mu.Lock()
-	p.inflight--
-	if p.inflight == 0 {
+	p.sendInflight--
+	if p.sendInflight == 0 {
 		p.inflightCond.Broadcast()
 	}
 	p.mu.Unlock()

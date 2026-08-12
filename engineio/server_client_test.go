@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// testWait bounds per-step waits. It is generous because the suite runs under
+// -race on slow machines with several test binaries in parallel.
+const testWait = 30 * time.Second
+
 func newEchoServer(t *testing.T, opts *Options) (*Server, *httptest.Server) {
 	t.Helper()
 	srv := NewServer(opts)
@@ -71,7 +75,7 @@ func TestEchoPolling(t *testing.T) {
 			if got != msg {
 				t.Fatalf("echo = %q, want %q", got, msg)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(testWait):
 			t.Fatalf("timeout waiting for echo %q", msg)
 		}
 	}
@@ -108,7 +112,7 @@ func TestEchoWebsocketUpgrade(t *testing.T) {
 			if got != msg {
 				t.Fatalf("echo = %q, want %q", got, msg)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(testWait):
 			t.Fatalf("timeout waiting for echo %q", msg)
 		}
 	}
@@ -133,7 +137,7 @@ func TestEchoDirectWebsocket(t *testing.T) {
 		if got != msg {
 			t.Fatalf("echo = %q, want %q", got, msg)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("timeout waiting for direct websocket echo")
 	}
 }
@@ -174,7 +178,7 @@ func TestBinaryEchoWebsocket(t *testing.T) {
 				t.Fatalf("binary echo mismatch at %d: %x != %x", i, got[i], payload[i])
 			}
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("timeout waiting for binary echo")
 	}
 }
@@ -206,7 +210,7 @@ func TestHeartbeatKeepsConnectionAlive(t *testing.T) {
 		if got != "still-alive" {
 			t.Fatalf("echo = %q", got)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("timeout waiting for echo after heartbeat cycles")
 	}
 }
@@ -235,7 +239,7 @@ func TestServerCloseNotifiesClient(t *testing.T) {
 	select {
 	case <-closed:
 		// expected
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("client was not notified of server close")
 	}
 }
@@ -266,7 +270,7 @@ func TestConcurrentEcho(t *testing.T) {
 						t.Errorf("client %d echo = %q, want %q", i, got, msg)
 						return
 					}
-				case <-time.After(5 * time.Second):
+				case <-time.After(testWait):
 					t.Errorf("client %d timeout (sid=%s)", i, c.SID())
 					return
 				}

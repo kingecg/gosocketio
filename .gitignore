@@ -1,2 +1,2 @@
-interop/js-client/node_modules/
+interop/*/node_modules/
 tmp_debug/

@@ -204,7 +204,13 @@ func (q *packetQueue) close() {
 
 func (s *Server) onEngineConnect(es *engineio.Socket) {
 	s.mu.Lock()
-	s.engines[es] = &engineConn{es: es, server: s, sockets: make(map[string]*Socket), in: newPacketQueue()}
+	// Data can arrive before this callback runs (the engine starts reading
+	// immediately), in which case connFor has already created the
+	// engineConn. Never replace it, or the socket registered by that
+	// instance would be lost on close.
+	if _, ok := s.engines[es]; !ok {
+		s.engines[es] = &engineConn{es: es, server: s, sockets: make(map[string]*Socket), in: newPacketQueue()}
+	}
 	s.mu.Unlock()
 }
 

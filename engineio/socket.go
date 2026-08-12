@@ -423,6 +423,29 @@ func (s *Socket) MaybeUpgrade(newTransport transport.Transport) {
 			s.logger.Debugf("engineio[%s]: upgrade confirmed, buffered=%d", s.id, buffered)
 
 			if old != nil {
+				// Replies produced just before the switch may still be sitting
+				// in the outgoing polling transport (no poll was pending). Wait
+				// for any pre-upgrade flush to finish, then re-queue those
+				// packets so they are delivered over the new transport instead
+				// of being dropped with the discarded transport.
+				if p, ok := old.(*transport.Polling); ok {
+					for {
+						s.mu.Lock()
+						sending := s.sending
+						s.mu.Unlock()
+						if !sending {
+							break
+						}
+						time.Sleep(time.Millisecond)
+					}
+					drained := p.DrainBuffered()
+					if len(drained) > 0 {
+						s.mu.Lock()
+						s.writeBuffer = append(drained, s.writeBuffer...)
+						s.mu.Unlock()
+						s.logger.Debugf("engineio[%s]: re-queued %d buffered packets after upgrade", s.id, len(drained))
+					}
+				}
 				old.Discard()
 				old.Close()
 			}
