@@ -195,3 +195,12 @@ type BroadcastOperator struct {
 func (b *BroadcastOperator) Emit(event string, args ...any) {
 	b.ns.broadcast(b.room, b.except, event, args)
 }
+
+// Except returns a new operator that also excludes the listed ids, chainable
+// before Emit. The receiver is left unchanged.
+func (b *BroadcastOperator) Except(ids ...string) *BroadcastOperator {
+	except := make([]string, 0, len(b.except)+len(ids))
+	except = append(except, b.except...)
+	except = append(except, ids...)
+	return &BroadcastOperator{ns: b.ns, room: b.room, except: except}
+}

@@ -105,6 +105,15 @@ func (s *Socket) To(room string) *BroadcastOperator {
 	return &BroadcastOperator{ns: s.nsp, room: room, except: []string{s.id}}
 }
 
+// ToExcept returns a broadcast operator targeting a room, excluding the
+// sender and the listed ids.
+func (s *Socket) ToExcept(room string, except []string) *BroadcastOperator {
+	ids := make([]string, 0, len(except)+1)
+	ids = append(ids, s.id)
+	ids = append(ids, except...)
+	return &BroadcastOperator{ns: s.nsp, room: room, except: ids}
+}
+
 // BroadcastToRoom sends an event to every socket in room except this one.
 func (s *Socket) BroadcastToRoom(room, event string, args ...any) {
 	s.nsp.broadcast(room, []string{s.id}, event, args)

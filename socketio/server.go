@@ -288,6 +288,18 @@ func (s *Server) BroadcastToRoom(nsp, room, event string, args ...any) {
 	}
 }
 
+// ToExcept sends an event to every socket in a namespace's room except the
+// listed ids. An empty except list delivers to every member, matching
+// BroadcastToRoom. It returns an error when the namespace does not exist.
+func (s *Server) ToExcept(nsp, room string, except []string, event string, args ...any) error {
+	ns := s.namespaceLookup(nsp)
+	if ns == nil {
+		return ErrInvalidNamespace
+	}
+	ns.broadcast(room, except, event, args)
+	return nil
+}
+
 func (s *Server) namespaceFor(name string) *namespace {
 	if name == "" {
 		name = defaultNamespace
@@ -700,4 +712,6 @@ func newSocket(ns *namespace, ec *engineConn) *Socket {
 var (
 	// ErrNotConnected is returned when emitting on a disconnected socket.
 	ErrNotConnected = errors.New("socketio: socket is not connected")
+	// ErrInvalidNamespace is returned when broadcasting to an unknown namespace.
+	ErrInvalidNamespace = errors.New("socketio: invalid namespace")
 )
