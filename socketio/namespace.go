@@ -25,11 +25,15 @@ type namespace struct {
 }
 
 func newNamespace(server *Server, name string) *namespace {
+	a := NewMemoryAdapter()
+	if f := server.adapterFactory; f != nil {
+		a = f(name)
+	}
 	return &namespace{
 		name:    name,
 		server:  server,
 		sockets: make(map[string]*Socket),
-		adapter: NewMemoryAdapter(),
+		adapter: a,
 		events:  make(map[string][]reflect.Value),
 	}
 }

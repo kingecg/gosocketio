@@ -55,6 +55,14 @@ type Server struct {
 	path   string
 	cors   *CORSConfig
 
+	// adapterFactory creates the Adapter backing each namespace. nil selects
+	// NewMemoryAdapter. Only namespaces created after it is set use it; the
+	// factory is invoked once per namespace with the namespace name.
+	adapterFactory AdapterFactory
+	// adapterLocked is true when the factory came from ServerConfig.Adapter,
+	// which takes precedence over SetAdapterFactory.
+	adapterLocked bool
+
 	mu      sync.RWMutex
 	nsps    map[string]*namespace
 	engines map[*engineio.Socket]*engineConn
@@ -72,17 +80,21 @@ func NewServerWithConfig(cfg *ServerConfig) *Server {
 	var opts *engineio.Options
 	var path string
 	var cors *CORSConfig
+	var adapter AdapterFactory
 	if cfg != nil {
 		opts = cfg.Engine
 		path = cfg.Path
 		cors = cfg.CORS
+		adapter = cfg.Adapter
 	}
 	s := &Server{
-		logger:  defaultLogger,
-		path:    path,
-		cors:    cors,
-		nsps:    make(map[string]*namespace),
-		engines: make(map[*engineio.Socket]*engineConn),
+		logger:         defaultLogger,
+		path:           path,
+		cors:           cors,
+		adapterFactory: adapter,
+		adapterLocked:  adapter != nil,
+		nsps:           make(map[string]*namespace),
+		engines:        make(map[*engineio.Socket]*engineConn),
 	}
 	s.engine = engineio.NewServer(opts)
 	s.engine.OnConnect(s.onEngineConnect)
@@ -242,8 +254,34 @@ func (w *corsWriter) Flush() {
 	}
 }
 
-// Close closes all sessions.
-func (s *Server) Close() { s.engine.Close() }
+// SetAdapterFactory sets the factory used to create the Adapter of namespaces
+// created after this call. It is ignored when a factory was already configured
+// through ServerConfig.Adapter. A nil factory selects the in-memory adapter.
+// Namespaces created before this call keep their existing adapter.
+func (s *Server) SetAdapterFactory(f AdapterFactory) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.adapterLocked {
+		return
+	}
+	s.adapterFactory = f
+}
+
+// Close closes all sessions and releases every namespace's adapter.
+func (s *Server) Close() {
+	s.mu.RLock()
+	nsps := make([]*namespace, 0, len(s.nsps))
+	for _, ns := range s.nsps {
+		nsps = append(nsps, ns)
+	}
+	s.mu.RUnlock()
+	for _, ns := range nsps {
+		if err := ns.adapter.Close(); err != nil {
+			s.logger.Warnf("socketio: adapter close: %v", err)
+		}
+	}
+	s.engine.Close()
+}
 
 // OnConnect registers a handler invoked when a client connects to a namespace.
 // Returning an error rejects the connection with a CONNECT_ERROR packet.
