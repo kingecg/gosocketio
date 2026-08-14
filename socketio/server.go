@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -318,6 +319,20 @@ func (s *Server) Namespace(nsp string) *namespace {
 		nsp = defaultNamespace
 	}
 	return s.namespaceFor(nsp)
+}
+
+// RegisterNamespace explicitly pre-registers a namespace so handlers can be
+// attached before any client connects. It is idempotent: registering an
+// already-created namespace returns nil. The namespace must start with "/" and
+// be longer than one character; the empty string and "/" are rejected with a
+// descriptive error. Implicit on-demand creation of unregistered namespaces is
+// unchanged.
+func (s *Server) RegisterNamespace(nsp string) error {
+	if !strings.HasPrefix(nsp, "/") || len(nsp) <= 1 {
+		return fmt.Errorf("socketio: invalid namespace %q: must start with \"/\" and be longer than one character", nsp)
+	}
+	s.namespaceFor(nsp)
+	return nil
 }
 
 // BroadcastToNamespace sends an event to every socket in a namespace.
