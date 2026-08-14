@@ -6,16 +6,51 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/kingecg/gosocketio/engineio"
 )
+
+// ServerConfig configures a Socket.IO server.
+type ServerConfig struct {
+	// Engine customizes the underlying Engine.IO server. nil selects the
+	// Engine.IO defaults.
+	Engine *engineio.Options
+
+	// Path restricts requests to those whose URL path has this prefix. The
+	// empty string disables the guard, matching the historical behavior of
+	// NewServer.
+	Path string
+
+	// CORS configures cross-origin access. nil disables CORS handling; the
+	// behavior itself is implemented by the CORS layer.
+	CORS *CORSConfig
+
+	// Adapter creates the room and membership backend for each namespace. nil
+	// selects the in-memory adapter.
+	Adapter AdapterFactory
+}
+
+// CORSConfig describes the cross-origin access rules of a server. AllowAll
+// permits every origin; AllowedOrigins lists the exact origins that are
+// permitted.
+type CORSConfig struct {
+	AllowAll       bool
+	AllowedOrigins []string
+}
+
+// AllowAll returns a CORSConfig that permits every origin.
+func AllowAll() *CORSConfig {
+	return &CORSConfig{AllowAll: true}
+}
 
 // Server is a Socket.IO server layered on top of an Engine.IO server. It
 // implements http.Handler.
 type Server struct {
 	engine *engineio.Server
 	logger engineio.Logger
+	path   string
 
 	mu      sync.RWMutex
 	nsps    map[string]*namespace
@@ -25,8 +60,21 @@ type Server struct {
 // NewServer creates a Socket.IO server with its own Engine.IO server. opts
 // customizes the underlying Engine.IO layer.
 func NewServer(opts *engineio.Options) *Server {
+	return NewServerWithConfig(&ServerConfig{Engine: opts})
+}
+
+// NewServerWithConfig creates a Socket.IO server from a ServerConfig. A nil
+// config or a zero-value config behaves exactly like NewServer(nil).
+func NewServerWithConfig(cfg *ServerConfig) *Server {
+	var opts *engineio.Options
+	var path string
+	if cfg != nil {
+		opts = cfg.Engine
+		path = cfg.Path
+	}
 	s := &Server{
 		logger:  defaultLogger,
+		path:    path,
 		nsps:    make(map[string]*namespace),
 		engines: make(map[*engineio.Socket]*engineConn),
 	}
@@ -48,8 +96,14 @@ func (s *Server) SetLogger(l engineio.Logger) {
 	}
 }
 
-// ServeHTTP implements http.Handler, delegating to the Engine.IO server.
+// ServeHTTP implements http.Handler. When the server has a configured path,
+// requests outside that prefix are rejected with 404 before delegating to the
+// Engine.IO server.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.path != "" && !strings.HasPrefix(r.URL.Path, s.path) {
+		http.NotFound(w, r)
+		return
+	}
 	s.engine.ServeHTTP(w, r)
 }
 
