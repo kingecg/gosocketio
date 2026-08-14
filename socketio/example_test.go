@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http/httptest"
+	"sort"
 	"time"
 
 	"github.com/kingecg/gosocketio/socketio"
@@ -171,13 +172,19 @@ func ExampleServer_BroadcastToRoom() {
 	if err := alice.Emit("/", "room message", "hello lobby"); err != nil {
 		log.Fatal(err)
 	}
+	msgs := make([]string, 0, 2)
 	for i := 0; i < 2; i++ {
 		select {
 		case m := <-got:
-			fmt.Println(m)
+			msgs = append(msgs, m)
 		case <-time.After(5 * time.Second):
 			log.Fatal("timed out waiting for room broadcast")
 		}
+	}
+	// Sort ensures deterministic output regardless of receive order.
+	sort.Strings(msgs)
+	for _, m := range msgs {
+		fmt.Println(m)
 	}
 	select {
 	case <-carolGot:
