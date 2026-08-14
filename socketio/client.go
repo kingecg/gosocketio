@@ -88,6 +88,7 @@ type Client struct {
 	onEvent        map[string]map[string][]reflect.Value
 	onDisconnect   map[string][]reflect.Value
 	onConnectError map[string][]reflect.Value
+	onError        map[string][]reflect.Value
 
 	// connecting holds the ack channel for a CONNECT packet still awaited.
 	// It is populated by connectNsp before the CONNECT packet is sent and
@@ -179,6 +180,16 @@ func (c *Client) OnConnectError(nsp string, f func(err error)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onConnectError[nsp] = append(c.onConnectError[nsp], reflect.ValueOf(f))
+}
+
+// OnError registers a handler invoked when an event handler fails to dispatch
+// (for example an argument that cannot be decoded into the handler's parameter
+// type), carrying the dispatch error. It is distinct from OnConnectError and
+// never fires for connect, disconnect or connect_error paths.
+func (c *Client) OnError(nsp string, f func(err error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onError[nsp] = append(c.onError[nsp], reflect.ValueOf(f))
 }
 
 // Connected reports whether the namespace is currently connected.
@@ -519,7 +530,11 @@ func (c *Client) handleEvent(pkt *Packet) {
 		wg.Add(1)
 		go func(h reflect.Value) {
 			defer wg.Done()
-			res := invokeClientHandler(h, args)
+			res, err := invokeClientHandler(h, args)
+			if err != nil {
+				c.fireOnError(nsp, err)
+				return
+			}
 			mu.Lock()
 			results = append(results, res...)
 			mu.Unlock()
@@ -576,6 +591,15 @@ func (c *Client) sendPacket(p *Packet) {
 func (c *Client) fireConnectError(nsp string, err error) {
 	c.mu.Lock()
 	handlers := c.onConnectError[nsp]
+	c.mu.Unlock()
+	for _, h := range handlers {
+		go h.Call([]reflect.Value{reflect.ValueOf(err)})
+	}
+}
+
+func (c *Client) fireOnError(nsp string, err error) {
+	c.mu.Lock()
+	handlers := c.onError[nsp]
 	c.mu.Unlock()
 	for _, h := range handlers {
 		go h.Call([]reflect.Value{reflect.ValueOf(err)})
@@ -748,6 +772,7 @@ func newClient(rawURL string, opts *Options) *Client {
 		onEvent:        make(map[string]map[string][]reflect.Value),
 		onDisconnect:   make(map[string][]reflect.Value),
 		onConnectError: make(map[string][]reflect.Value),
+		onError:        make(map[string][]reflect.Value),
 		acks:           newAckTable(),
 		connecting:     make(map[string]chan error),
 		in:             newPacketQueue(),
