@@ -458,14 +458,19 @@ func TestReaderFailingDropped(t *testing.T) {
 	case <-time.After(testWait):
 		t.Fatal("connection dead after failing reader emit")
 	}
-	var found bool
-	for _, w := range log.warnings() {
-		if strings.Contains(w, "reading binary payload") {
-			found = true
+	// The drop warning is logged from the event handler's goroutine, so poll
+	// with a deadline instead of asserting immediately (flaky otherwise).
+	deadline := time.Now().Add(testWait)
+	for {
+		for _, w := range log.warnings() {
+			if strings.Contains(w, "reading binary payload") {
+				return
+			}
 		}
-	}
-	if !found {
-		t.Fatalf("expected drop warning, got %v", log.warnings())
+		if time.Now().After(deadline) {
+			t.Fatalf("expected drop warning, got %v", log.warnings())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
