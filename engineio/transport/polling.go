@@ -60,11 +60,17 @@ func (p *Polling) SetMaxBufferSize(n int64) {
 	p.mu.Unlock()
 }
 
-// SetLogger sets the logger used by the transport.
+// SetLogger sets the logger used by the transport. It also configures the
+// package-level logger so that payloads truncated by DecodePayloadWithLimit
+// are logged through the transport's logger.
 func (p *Polling) SetLogger(l Logger) {
+	if l == nil {
+		return
+	}
 	p.mu.Lock()
 	p.logger = l
 	p.mu.Unlock()
+	SetLogger(l)
 }
 
 func (p *Polling) Name() string { return "polling" }
@@ -203,8 +209,18 @@ func (p *Polling) onDataRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pkts, err := DecodePayload(body)
+	pkts, err := DecodePayloadWithLimit(body, maxBufferSize)
 	if err != nil {
+		if errors.Is(err, ErrPayloadTooLarge) {
+			// A single packet exceeds maxPayload: the payload cannot be
+			// partially honored, so the session is closed (design §10).
+			p.mu.Lock()
+			logger := p.logger
+			p.mu.Unlock()
+			if logger != nil {
+				logger.Warnf("engineio: closing connection: %v", err)
+			}
+		}
 		if h != nil {
 			h.OnError(err)
 		}

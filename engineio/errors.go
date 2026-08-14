@@ -46,6 +46,11 @@ var (
 	// ErrHeartbeatTimeout is returned when the peer fails to answer a ping
 	// within the configured ping timeout.
 	ErrHeartbeatTimeout = errors.New("engineio: heartbeat timeout")
+
+	// ErrPayloadTooLarge is returned when a single packet in a polling
+	// payload exceeds the configured maxPayload. It aliases
+	// transport.ErrPayloadTooLarge so errors.Is matches both levels.
+	ErrPayloadTooLarge = transport.ErrPayloadTooLarge
 )
 
 // wrapInvalidPacket rewraps a transport packet-decode error as

@@ -173,7 +173,9 @@ func (p *clientPolling) pollLoop() {
 			return
 		}
 
-		pkts, err := transport.DecodePayload(body)
+		// The client does not enforce maxPayload: the server is authoritative
+		// (it advertises maxPayload in the open packet and enforces it).
+		pkts, err := transport.DecodePayloadWithLimit(body, 0)
 		if err != nil {
 			p.handler.OnError(err)
 			return

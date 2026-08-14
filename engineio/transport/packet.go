@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // Type is the Engine.IO packet type.
@@ -66,6 +67,45 @@ var ErrInvalidPacket = errors.New("engineio: invalid packet")
 
 // ErrInvalidPayload is returned when a polling payload cannot be decoded.
 var ErrInvalidPayload = errors.New("engineio: invalid payload")
+
+// ErrPayloadTooLarge is returned when a single packet within a polling
+// payload exceeds the configured maxPayload. It is treated as fatal: the
+// caller closes the connection (the payload cannot be partially honored).
+var ErrPayloadTooLarge = errors.New("engineio: payload too large")
+
+// packageLogger is used by DecodePayloadWithLimit to warn about payloads
+// truncated at the cumulative maxPayload limit. It defaults to discarding
+// output; override it with SetLogger. It is guarded by loggerMu because
+// transports may configure it concurrently during handshakes.
+var (
+	loggerMu      sync.RWMutex
+	packageLogger Logger = nopLogger{}
+)
+
+// SetLogger sets the package-level logger used for payload-truncation
+// warnings. A nil logger leaves the current logger in place.
+func SetLogger(l Logger) {
+	if l == nil {
+		return
+	}
+	loggerMu.Lock()
+	packageLogger = l
+	loggerMu.Unlock()
+}
+
+// warnf logs through the package-level logger.
+func warnf(format string, args ...any) {
+	loggerMu.RLock()
+	l := packageLogger
+	loggerMu.RUnlock()
+	l.Warnf(format, args...)
+}
+
+// nopLogger discards all log output.
+type nopLogger struct{}
+
+func (nopLogger) Debugf(format string, args ...any) {}
+func (nopLogger) Warnf(format string, args ...any)  {}
 
 // EncodePacket serializes a packet.
 //
@@ -146,12 +186,38 @@ func EncodePayload(pkts []*Packet) []byte {
 // DecodePayload parses a polling payload into its packets. The input must be
 // plain text (the v4 protocol never sends raw binary in polling payloads).
 func DecodePayload(b []byte) ([]*Packet, error) {
+	return DecodePayloadWithLimit(b, 0)
+}
+
+// DecodePayloadWithLimit parses a polling payload into its packets while
+// enforcing a maximum size. A maxPayload <= 0 disables the limit entirely.
+//
+// A single packet whose own encoded size exceeds maxPayload is fatal and
+// returns an error wrapping ErrPayloadTooLarge; the caller must close the
+// connection. When the cumulative size of the packets decoded so far would
+// exceed maxPayload, the remaining tail packets (the newest) are dropped
+// with a warning instead — the payload is recoverable and the connection
+// stays open.
+func DecodePayloadWithLimit(b []byte, maxPayload int64) ([]*Packet, error) {
 	if len(b) == 0 {
 		return nil, nil
 	}
 	parts := bytes.Split(b, []byte{separator})
 	out := make([]*Packet, 0, len(parts))
-	for _, part := range parts {
+	var decoded int64
+	for i, part := range parts {
+		if maxPayload > 0 {
+			size := int64(len(part))
+			if size > maxPayload {
+				return out, fmt.Errorf("%w: packet %d bytes exceeds maxPayload %d", ErrPayloadTooLarge, size, maxPayload)
+			}
+			if decoded+size > maxPayload {
+				dropped := int64(len(parts) - i)
+				warnf("engineio: dropping %d packet(s) beyond maxPayload %d (cumulative %d bytes)", dropped, maxPayload, decoded)
+				break
+			}
+			decoded += size
+		}
 		p, err := DecodePacket(part, false)
 		if err != nil {
 			return out, fmt.Errorf("%w: %v", ErrInvalidPayload, err)
