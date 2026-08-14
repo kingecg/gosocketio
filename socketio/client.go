@@ -59,6 +59,12 @@ func (o *Options) withDefaults() Options {
 	if opts.Timeout == 0 {
 		opts.Timeout = 10 * time.Second
 	}
+	// A zero RandomizationFactor is treated as unset and defaults to 0.5,
+	// matching the README. This deliberately re-enables reconnect jitter for
+	// every client that did not configure it explicitly.
+	if opts.RandomizationFactor == 0 {
+		opts.RandomizationFactor = 0.5
+	}
 	return opts
 }
 
@@ -103,6 +109,7 @@ type nsClient struct {
 	nsp       string
 	connected bool
 	sid       string
+	auth      map[string]any
 }
 
 // Dial connects to a Socket.IO server. It blocks until the root namespace
@@ -334,6 +341,7 @@ func (c *Client) connectNsp(ctx context.Context, nsp string, data map[string]any
 		c.nsps[nsp] = nc
 	}
 	nc.connected = false
+	nc.auth = data
 	c.connecting[nsp] = ch
 	c.mu.Unlock()
 
@@ -690,7 +698,14 @@ func (c *Client) reconnectAttempt(nsps []string) (err error) {
 		return err
 	}
 	for _, nsp := range nsps {
-		if err = c.connectNsp(ctx, nsp, nil); err != nil {
+		c.mu.Lock()
+		nc := c.nsps[nsp]
+		var auth map[string]any
+		if nc != nil {
+			auth = nc.auth
+		}
+		c.mu.Unlock()
+		if err = c.connectNsp(ctx, nsp, auth); err != nil {
 			return err
 		}
 	}
