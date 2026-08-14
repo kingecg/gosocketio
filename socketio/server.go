@@ -294,6 +294,14 @@ func (s *Server) OnDisconnect(nsp string, f func(*Socket, string)) {
 	s.namespaceFor(nsp).OnDisconnect(f)
 }
 
+// OnError registers a handler invoked when an event handler fails to dispatch
+// (for example an argument that cannot be decoded into the handler's parameter
+// type), carrying the socket and the dispatch error. It never fires for
+// connect, disconnect or connect_error paths.
+func (s *Server) OnError(nsp string, f func(*Socket, error)) {
+	s.namespaceFor(nsp).OnError(f)
+}
+
 // OnEvent registers a handler for an event within a namespace.
 func (s *Server) OnEvent(nsp, event string, f any) {
 	s.namespaceFor(nsp).OnEvent(event, f)
@@ -652,7 +660,11 @@ func (s *Server) handleEvent(ec *engineConn, pkt *Packet) {
 		wg.Add(1)
 		go func(h reflect.Value) {
 			defer wg.Done()
-			res := invokeHandler(h, sock, args)
+			res, err := invokeHandler(h, sock, args)
+			if err != nil {
+				sock.nsp.fireOnError(sock, err)
+				return
+			}
 			mu.Lock()
 			results = append(results, res...)
 			mu.Unlock()

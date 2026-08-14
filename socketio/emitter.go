@@ -7,7 +7,10 @@ import (
 
 // invokeHandler calls a registered handler with the socket and the decoded
 // event arguments. The first handler parameter must be *Socket. Return values
-// are collected as the acknowledgement payload.
+// are collected as the acknowledgement payload. A non-nil error is returned
+// when the handler's signature does not accept *Socket or an argument cannot
+// be decoded into its parameter type (wrapping ErrHandlerMismatch); the caller
+// is responsible for surfacing it.
 //
 // Supported signatures:
 //
@@ -16,14 +19,14 @@ import (
 //	func(s *Socket, a int, b map[string]any)
 //	func(s *Socket, a *T)
 //	... with zero or more return values used as the ack payload.
-func invokeHandler(h reflect.Value, s *Socket, args []any) []any {
+func invokeHandler(h reflect.Value, s *Socket, args []any) ([]any, error) {
 	ht := h.Type()
 	numIn := ht.NumIn()
 	in := make([]reflect.Value, numIn)
 	for i := 0; i < numIn; i++ {
 		if i == 0 {
 			if !ht.In(0).AssignableTo(reflect.TypeOf(s)) {
-				return nil
+				return nil, ErrHandlerMismatch
 			}
 			in[i] = reflect.ValueOf(s)
 			continue
@@ -33,7 +36,7 @@ func invokeHandler(h reflect.Value, s *Socket, args []any) []any {
 		if argIndex < len(args) {
 			v, ok := convertArg(args[argIndex], pt)
 			if !ok {
-				return nil
+				return nil, ErrHandlerMismatch
 			}
 			in[i] = v
 		} else {
@@ -42,7 +45,7 @@ func invokeHandler(h reflect.Value, s *Socket, args []any) []any {
 	}
 
 	outs := h.Call(in)
-	return collectResults(outs)
+	return collectResults(outs), nil
 }
 
 // invokeClientHandler calls a client-side event handler with the decoded event

@@ -21,6 +21,7 @@ type namespace struct {
 	middlewares []Middleware
 	connect     []reflect.Value
 	disconnect  []reflect.Value
+	onError     []reflect.Value
 	events      map[string][]reflect.Value
 }
 
@@ -54,6 +55,16 @@ func (n *namespace) OnDisconnect(f func(*Socket, string)) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.disconnect = append(n.disconnect, reflect.ValueOf(f))
+}
+
+// OnError registers a handler invoked when an event handler fails to dispatch
+// (for example an argument that cannot be decoded into the handler's parameter
+// type), carrying the socket and the dispatch error. It never fires for
+// connect, disconnect or connect_error paths.
+func (n *namespace) OnError(f func(*Socket, error)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.onError = append(n.onError, reflect.ValueOf(f))
 }
 
 // OnEvent registers a handler for a named event.
@@ -123,6 +134,17 @@ func (n *namespace) handlersFor(event string) []reflect.Value {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.events[event]
+}
+
+// fireOnError invokes every registered OnError handler for the dispatch error
+// on its own goroutine, so a blocking handler cannot stall packet processing.
+func (n *namespace) fireOnError(s *Socket, err error) {
+	n.mu.RLock()
+	hs := n.onError
+	n.mu.RUnlock()
+	for _, h := range hs {
+		go h.Call([]reflect.Value{reflect.ValueOf(s), reflect.ValueOf(err)})
+	}
 }
 
 func (n *namespace) addSocket(s *Socket) {
