@@ -26,6 +26,7 @@ const (
 	Noop    Type = '6'
 )
 
+// String returns the packet type name.
 func (t Type) String() string {
 	switch t {
 	case Open:

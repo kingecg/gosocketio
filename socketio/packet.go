@@ -25,6 +25,7 @@ const (
 	BinaryAck    PacketType = '6'
 )
 
+// String returns the packet type name.
 func (t PacketType) String() string {
 	switch t {
 	case Connect:
