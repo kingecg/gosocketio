@@ -16,8 +16,8 @@ type namespace struct {
 	server *Server
 
 	mu          sync.RWMutex
-	sockets     map[string]*Socket             // id -> socket
-	rooms       map[string]map[string]struct{} // room -> socket ids
+	sockets     map[string]*Socket // id -> socket (id resolution table only)
+	adapter     Adapter            // authoritative room/membership backend
 	middlewares []Middleware
 	connect     []reflect.Value
 	disconnect  []reflect.Value
@@ -29,7 +29,7 @@ func newNamespace(server *Server, name string) *namespace {
 		name:    name,
 		server:  server,
 		sockets: make(map[string]*Socket),
-		rooms:   make(map[string]map[string]struct{}),
+		adapter: NewMemoryAdapter(),
 		events:  make(map[string][]reflect.Value),
 	}
 }
@@ -77,22 +77,15 @@ func (n *namespace) To(room string) *BroadcastOperator {
 	return &BroadcastOperator{ns: n, room: room}
 }
 
-// Sockets returns a snapshot of the connected socket ids.
+// Sockets returns a snapshot of the connected socket ids. The adapter is
+// authoritative for membership.
 func (n *namespace) Sockets() []string {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	out := make([]string, 0, len(n.sockets))
-	for id := range n.sockets {
-		out = append(out, id)
-	}
-	return out
+	return n.adapter.Sockets()
 }
 
 // SocketsCount returns the number of connected sockets.
 func (n *namespace) SocketsCount() int {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	return len(n.sockets)
+	return n.adapter.SocketsCount()
 }
 
 func (n *namespace) runMiddlewares(s *Socket, data map[string]any) error {
@@ -130,76 +123,37 @@ func (n *namespace) handlersFor(event string) []reflect.Value {
 
 func (n *namespace) addSocket(s *Socket) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	n.sockets[s.id] = s
-	// every socket automatically joins a room named after its own id
-	if n.rooms[s.id] == nil {
-		n.rooms[s.id] = make(map[string]struct{})
-	}
-	n.rooms[s.id][s.id] = struct{}{}
+	n.mu.Unlock()
+	n.adapter.AddSocket(s.id)
 }
 
 func (n *namespace) removeSocket(s *Socket) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	delete(n.sockets, s.id)
-	for room, m := range n.rooms {
-		if _, ok := m[s.id]; ok {
-			delete(m, s.id)
-			if len(m) == 0 {
-				delete(n.rooms, room)
-			}
-		}
-	}
+	n.mu.Unlock()
+	n.adapter.RemoveSocket(s.id)
 }
 
 func (n *namespace) addToRoom(room string, s *Socket) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.rooms[room] == nil {
-		n.rooms[room] = make(map[string]struct{})
-	}
-	n.rooms[room][s.id] = struct{}{}
+	n.adapter.AddToRoom(room, s.id)
 }
 
 func (n *namespace) removeFromRoom(room string, s *Socket) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if m := n.rooms[room]; m != nil {
-		delete(m, s.id)
-		if len(m) == 0 {
-			delete(n.rooms, room)
-		}
-	}
+	n.adapter.RemoveFromRoom(room, s.id)
 }
 
 // broadcast sends an event to every socket in the room (or the whole
-// namespace when room is empty), excluding the optional socket.
-func (n *namespace) broadcast(room string, except *Socket, event string, args []any) {
-	n.mu.RLock()
-	var targets []*Socket
-	if room != "" {
-		for id := range n.rooms[room] {
-			if except != nil && id == except.id {
-				continue
-			}
-			if s, ok := n.sockets[id]; ok {
-				targets = append(targets, s)
-			}
+// namespace when room is empty), excluding the listed socket ids.
+func (n *namespace) broadcast(room string, except []string, event string, args []any) {
+	n.adapter.Broadcast(room, except, func(id string) {
+		n.mu.RLock()
+		s := n.sockets[id]
+		n.mu.RUnlock()
+		if s != nil {
+			_ = s.Emit(event, args...)
 		}
-	} else {
-		for id, s := range n.sockets {
-			if except != nil && id == except.id {
-				continue
-			}
-			targets = append(targets, s)
-		}
-	}
-	n.mu.RUnlock()
-
-	for _, s := range targets {
-		_ = s.Emit(event, args...)
-	}
+	})
 }
 
 // disconnectSocket removes the socket from the namespace, notifies the
@@ -212,16 +166,12 @@ func (n *namespace) disconnectSocket(s *Socket, reason string) {
 		return
 	}
 	delete(n.sockets, s.id)
-	for room, m := range n.rooms {
-		if _, ok := m[s.id]; ok {
-			delete(m, s.id)
-			if len(m) == 0 {
-				delete(n.rooms, room)
-			}
-		}
-	}
 	disc := n.disconnect
 	n.mu.Unlock()
+
+	// Remove the id from the adapter after n.sockets: reversing the order
+	// would let a concurrent broadcast deliver to a disconnecting socket.
+	n.adapter.RemoveSocket(s.id)
 
 	s.setConnected(false)
 	s.acks.clear()
@@ -238,7 +188,7 @@ func (n *namespace) disconnectSocket(s *Socket, reason string) {
 type BroadcastOperator struct {
 	ns     *namespace
 	room   string
-	except *Socket
+	except []string
 }
 
 // Emit sends the event to the targeted sockets.

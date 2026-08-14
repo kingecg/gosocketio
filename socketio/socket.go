@@ -102,17 +102,17 @@ func (s *Socket) LeaveRoom(room string) {
 
 // To returns a broadcast operator targeting a single room.
 func (s *Socket) To(room string) *BroadcastOperator {
-	return &BroadcastOperator{ns: s.nsp, room: room, except: s}
+	return &BroadcastOperator{ns: s.nsp, room: room, except: []string{s.id}}
 }
 
 // BroadcastToRoom sends an event to every socket in room except this one.
 func (s *Socket) BroadcastToRoom(room, event string, args ...any) {
-	s.nsp.broadcast(room, s, event, args)
+	s.nsp.broadcast(room, []string{s.id}, event, args)
 }
 
 // Broadcast sends an event to every socket in the namespace except this one.
 func (s *Socket) Broadcast(event string, args ...any) {
-	s.nsp.broadcast("", s, event, args)
+	s.nsp.broadcast("", []string{s.id}, event, args)
 }
 
 // Disconnect disconnects this namespace socket, notifying the client.
