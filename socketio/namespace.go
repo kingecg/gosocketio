@@ -22,6 +22,7 @@ type namespace struct {
 	connect     []reflect.Value
 	disconnect  []reflect.Value
 	onError     []reflect.Value
+	onAny       []reflect.Value
 	events      map[string][]reflect.Value
 }
 
@@ -65,6 +66,17 @@ func (n *namespace) OnError(f func(*Socket, error)) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.onError = append(n.onError, reflect.ValueOf(f))
+}
+
+// OnAny registers a handler invoked for every event received in the
+// namespace, before the named event handlers dispatch. It receives the
+// socket, the event name and the decoded arguments. It fires for every EVENT
+// packet — including events with no registered handler — and never for
+// connect, disconnect, connect_error or acknowledgement packets.
+func (n *namespace) OnAny(f func(*Socket, string, []any)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.onAny = append(n.onAny, reflect.ValueOf(f))
 }
 
 // OnEvent registers a handler for a named event.
@@ -144,6 +156,17 @@ func (n *namespace) fireOnError(s *Socket, err error) {
 	n.mu.RUnlock()
 	for _, h := range hs {
 		go h.Call([]reflect.Value{reflect.ValueOf(s), reflect.ValueOf(err)})
+	}
+}
+
+// fireOnAny invokes every registered OnAny handler for the event on its own
+// goroutine, so a blocking handler cannot stall packet processing.
+func (n *namespace) fireOnAny(s *Socket, name string, args []any) {
+	n.mu.RLock()
+	hs := n.onAny
+	n.mu.RUnlock()
+	for _, h := range hs {
+		go h.Call([]reflect.Value{reflect.ValueOf(s), reflect.ValueOf(name), reflect.ValueOf(args)})
 	}
 }
 

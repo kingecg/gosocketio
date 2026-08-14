@@ -308,6 +308,15 @@ func (s *Server) OnEvent(nsp, event string, f any) {
 	s.namespaceFor(nsp).OnEvent(event, f)
 }
 
+// OnAny registers a handler invoked for every event a client emits in the
+// namespace, before the named event handlers dispatch. The handler receives
+// the socket, the event name and the decoded arguments. It fires for every
+// EVENT packet — including events with no registered handler — and never for
+// connect, disconnect, connect_error or acknowledgement packets.
+func (s *Server) OnAny(nsp string, f func(*Socket, string, []any)) {
+	s.namespaceFor(nsp).OnAny(f)
+}
+
 // Use registers a connection middleware for a namespace.
 func (s *Server) Use(nsp string, m Middleware) {
 	s.namespaceFor(nsp).Use(m)
@@ -664,6 +673,10 @@ func (s *Server) handleEvent(ec *engineConn, pkt *Packet) {
 		return
 	}
 	args := data[1:]
+
+	// The OnAny hook fires for every event, including events with no
+	// registered handler, before the named handlers dispatch.
+	sock.nsp.fireOnAny(sock, name, args)
 
 	// Handlers run on their own goroutines so a handler that blocks (for
 	// example waiting for a round-trip acknowledgement) does not stall the
