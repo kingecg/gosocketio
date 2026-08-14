@@ -5,10 +5,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
 
+	"github.com/coder/websocket"
 	"github.com/kingecg/gosocketio/engineio"
 )
 
@@ -51,6 +53,7 @@ type Server struct {
 	engine *engineio.Server
 	logger engineio.Logger
 	path   string
+	cors   *CORSConfig
 
 	mu      sync.RWMutex
 	nsps    map[string]*namespace
@@ -68,13 +71,16 @@ func NewServer(opts *engineio.Options) *Server {
 func NewServerWithConfig(cfg *ServerConfig) *Server {
 	var opts *engineio.Options
 	var path string
+	var cors *CORSConfig
 	if cfg != nil {
 		opts = cfg.Engine
 		path = cfg.Path
+		cors = cfg.CORS
 	}
 	s := &Server{
 		logger:  defaultLogger,
 		path:    path,
+		cors:    cors,
 		nsps:    make(map[string]*namespace),
 		engines: make(map[*engineio.Socket]*engineConn),
 	}
@@ -83,7 +89,27 @@ func NewServerWithConfig(cfg *ServerConfig) *Server {
 	s.engine.OnData(s.onEngineData)
 	s.engine.OnClose(s.onEngineClose)
 	s.nsps[defaultNamespace] = newNamespace(s, defaultNamespace)
+	// CORS handling owns the WebSocket origin policy; without CORS the
+	// engine's own AcceptOptions stays untouched.
+	if cors != nil {
+		s.configureAcceptOptions(cors)
+	}
 	return s
+}
+
+func (s *Server) configureAcceptOptions(cors *CORSConfig) {
+	ao := s.engine.AcceptOptions
+	if ao == nil {
+		ao = &websocket.AcceptOptions{}
+	}
+	if cors.AllowAll {
+		ao.InsecureSkipVerify = true
+		ao.OriginPatterns = nil
+	} else {
+		ao.InsecureSkipVerify = false
+		ao.OriginPatterns = append([]string(nil), cors.AllowedOrigins...)
+	}
+	s.engine.AcceptOptions = ao
 }
 
 // Engine returns the underlying Engine.IO server.
@@ -98,13 +124,122 @@ func (s *Server) SetLogger(l engineio.Logger) {
 
 // ServeHTTP implements http.Handler. When the server has a configured path,
 // requests outside that prefix are rejected with 404 before delegating to the
-// Engine.IO server.
+// Engine.IO server. When CORS is configured, preflight and origin checks run
+// after the path guard and before the engine.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.path != "" && !strings.HasPrefix(r.URL.Path, s.path) {
 		http.NotFound(w, r)
 		return
 	}
+	if s.cors != nil {
+		var ok bool
+		if w, ok = s.handleCORS(w, r); !ok {
+			return
+		}
+	}
 	s.engine.ServeHTTP(w, r)
+}
+
+// handleCORS applies the CORS policy to a request that passed the path guard.
+// It returns the (possibly wrapped) ResponseWriter and false when the request
+// was fully handled here and must not reach the engine.
+func (s *Server) handleCORS(w http.ResponseWriter, r *http.Request) (http.ResponseWriter, bool) {
+	origin := r.Header.Get("Origin")
+	allowed := s.cors.AllowAll || s.cors.originAllowed(origin)
+
+	if r.Method == http.MethodOptions {
+		if !allowed {
+			w.WriteHeader(http.StatusForbidden)
+			return nil, false
+		}
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", corsOriginValue(s.cors, origin))
+		h.Set("Access-Control-Allow-Methods", "GET,POST")
+		if acrh := r.Header.Get("Access-Control-Request-Headers"); acrh != "" {
+			h.Set("Access-Control-Allow-Headers", acrh)
+		}
+		h.Set("Access-Control-Max-Age", "86400")
+		h.Add("Vary", "Origin")
+		w.WriteHeader(http.StatusNoContent)
+		return nil, false
+	}
+
+	if !allowed {
+		w.WriteHeader(http.StatusForbidden)
+		return nil, false
+	}
+	return &corsWriter{ResponseWriter: w, origin: corsOriginValue(s.cors, origin)}, true
+}
+
+// originAllowed reports whether origin is permitted by c. Matching is an
+// exact, case-insensitive comparison of scheme://host[:port]; wildcards are
+// not supported. The empty origin (non-browser client) and the literal
+// "null" origin (sandboxed iframe) are only accepted when every origin is
+// allowed.
+func (c *CORSConfig) originAllowed(origin string) bool {
+	if c.AllowAll {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	for _, allowed := range c.AllowedOrigins {
+		au, err := url.Parse(allowed)
+		if err != nil || au.Host == "" {
+			continue
+		}
+		if strings.EqualFold(u.Scheme, au.Scheme) && strings.EqualFold(u.Host, au.Host) {
+			return true
+		}
+	}
+	return false
+}
+
+func corsOriginValue(c *CORSConfig, origin string) string {
+	if c.AllowAll {
+		return "*"
+	}
+	return origin
+}
+
+// corsWriter decorates a ResponseWriter with the CORS response headers,
+// installed before the status is committed.
+type corsWriter struct {
+	http.ResponseWriter
+	origin string
+	wrote  bool
+}
+
+func (w *corsWriter) WriteHeader(code int) {
+	w.writeHeaders()
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *corsWriter) Write(b []byte) (int, error) {
+	w.writeHeaders()
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *corsWriter) writeHeaders() {
+	if w.wrote {
+		return
+	}
+	w.wrote = true
+	w.Header().Set("Access-Control-Allow-Origin", w.origin)
+	w.Header().Add("Vary", "Origin")
+}
+
+// Unwrap lets http.ResponseController and libraries that unwrap writers
+// (e.g. the WebSocket accept handshake) reach the underlying writer.
+func (w *corsWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// Flush satisfies the direct http.Flusher assertion used by the engine's
+// polling transport.
+func (w *corsWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // Close closes all sessions.
