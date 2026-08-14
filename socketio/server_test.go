@@ -175,7 +175,10 @@ func TestPacketDecodeInvalid(t *testing.T) {
 func TestBinaryDeconstruct(t *testing.T) {
 	data := []any{"ev", []byte("hello"), map[string]any{"nested": []byte{0x01, 0x02}}}
 	var bufs [][]byte
-	dec := deconstruct(data, &bufs)
+	dec, err := deconstruct(data, &bufs)
+	if err != nil {
+		t.Fatalf("deconstruct: %v", err)
+	}
 	if len(bufs) != 2 {
 		t.Fatalf("want 2 buffers, got %d", len(bufs))
 	}

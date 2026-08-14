@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"reflect"
 	"strconv"
 )
 
@@ -217,10 +219,10 @@ type placeholder struct {
 	Num         int  `json:"num"`
 }
 
-// hasBinary reports whether v contains any []byte values.
+// hasBinary reports whether v contains any []byte or io.Reader values.
 func hasBinary(v any) bool {
 	switch x := v.(type) {
-	case []byte:
+	case []byte, io.Reader:
 		return true
 	case []any:
 		for _, e := range x {
@@ -238,29 +240,63 @@ func hasBinary(v any) bool {
 	return false
 }
 
-// deconstruct walks v replacing every []byte with a placeholder and appends
-// the raw buffers to bufs in order.
-func deconstruct(v any, bufs *[][]byte) any {
+// deconstruct walks v replacing every []byte and io.Reader with a placeholder
+// and appends the raw buffers to bufs in order. io.Reader values are read to
+// EOF exactly once at encode time; a read failure returns an error and leaves
+// bufs untouched for that value.
+func deconstruct(v any, bufs *[][]byte) (any, error) {
 	switch x := v.(type) {
 	case []byte:
 		num := len(*bufs)
 		*bufs = append(*bufs, x)
-		return placeholder{Placeholder: true, Num: num}
+		return placeholder{Placeholder: true, Num: num}, nil
+	case io.Reader:
+		b, err := readAll(x)
+		if err != nil {
+			return nil, fmt.Errorf("socketio: reading binary payload: %w", err)
+		}
+		num := len(*bufs)
+		*bufs = append(*bufs, b)
+		return placeholder{Placeholder: true, Num: num}, nil
 	case []any:
 		out := make([]any, len(x))
 		for i, e := range x {
-			out[i] = deconstruct(e, bufs)
+			d, err := deconstruct(e, bufs)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = d
 		}
-		return out
+		return out, nil
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for k, e := range x {
-			out[k] = deconstruct(e, bufs)
+			d, err := deconstruct(e, bufs)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = d
 		}
-		return out
+		return out, nil
 	default:
-		return v
+		return v, nil
 	}
+}
+
+// readAll drains r to EOF. A nil reader (including a typed nil such as
+// (*bytes.Reader)(nil), whose Read method would panic) is treated as an empty
+// payload.
+func readAll(r io.Reader) ([]byte, error) {
+	if r == nil {
+		return []byte{}, nil
+	}
+	switch rv := reflect.ValueOf(r); rv.Kind() {
+	case reflect.Pointer, reflect.Chan, reflect.Func, reflect.Map, reflect.Slice, reflect.Interface:
+		if rv.IsNil() {
+			return []byte{}, nil
+		}
+	}
+	return io.ReadAll(r)
 }
 
 // reconstruct walks v (as decoded from JSON) replacing placeholders with the

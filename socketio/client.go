@@ -571,7 +571,12 @@ func (c *Client) sendPacket(p *Packet) {
 	}
 	if p.Data != nil && hasBinary(p.Data) {
 		var bufs [][]byte
-		p.Data = deconstruct(p.Data, &bufs)
+		var err error
+		p.Data, err = deconstruct(p.Data, &bufs)
+		if err != nil {
+			c.logf().Warnf("socketio: dropping packet %v: %v", p.Type, err)
+			return
+		}
 		switch p.Type {
 		case Event:
 			p.Type = BinaryEvent

@@ -555,7 +555,12 @@ func (ec *engineConn) process(pkt *Packet) {
 func (s *Server) sendPacket(ec *engineConn, pkt *Packet) {
 	if pkt.Data != nil && hasBinary(pkt.Data) {
 		var bufs [][]byte
-		pkt.Data = deconstruct(pkt.Data, &bufs)
+		var err error
+		pkt.Data, err = deconstruct(pkt.Data, &bufs)
+		if err != nil {
+			s.logger.Warnf("socketio: dropping packet %v: %v", pkt.Type, err)
+			return
+		}
 		switch pkt.Type {
 		case Event:
 			pkt.Type = BinaryEvent
