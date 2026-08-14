@@ -222,7 +222,7 @@ func (c *Client) DisconnectNamespace(nsp string) {
 // Emit sends an event on a namespace without an acknowledgement.
 func (c *Client) Emit(nsp, event string, args ...any) error {
 	if !c.Connected(nsp) {
-		return ErrNotConnected
+		return ErrNamespaceNotConnected
 	}
 	c.sendPacket(&Packet{Type: Event, Nsp: nsp, ID: -1, Data: append([]any{event}, args...)})
 	return nil
@@ -232,7 +232,7 @@ func (c *Client) Emit(nsp, event string, args ...any) error {
 // with the server's reply once it arrives.
 func (c *Client) EmitWithAck(nsp, event string, cb func(args []any), args ...any) (int64, error) {
 	if !c.Connected(nsp) {
-		return -1, ErrNotConnected
+		return -1, ErrNamespaceNotConnected
 	}
 	if cb == nil {
 		c.sendPacket(&Packet{Type: Event, Nsp: nsp, ID: -1, Data: append([]any{event}, args...)})

@@ -2,6 +2,7 @@ package socketio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -336,7 +337,7 @@ func TestClientServerInitiatedDisconnect(t *testing.T) {
 	if c.Connected("/") {
 		t.Fatal("still connected after kick")
 	}
-	if err := c.Emit("/", "kick"); err != ErrNotConnected {
+	if err := c.Emit("/", "kick"); !errors.Is(err, ErrNotConnected) {
 		t.Fatalf("expected ErrNotConnected, got %v", err)
 	}
 }
