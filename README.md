@@ -14,14 +14,26 @@ official `socket.io` and `socket.io-client` Node.js packages.
     (polling and websocket, upgrades, ping/pong, session management).
   - `github.com/kingecg/gosocketio/socketio` — the Socket.IO message layer
     (namespaces, events, acknowledgements, binary payloads, reconnection).
-- **Namespaces** with per-namespace handlers and connection middleware.
-- **Rooms** with room-scoped broadcasts.
+- **Namespaces** with per-namespace handlers, connection middleware and
+  explicit pre-registration (`RegisterNamespace`).
+- **Rooms** with room-scoped broadcasts, per-socket exclusion
+  (`ToExcept`/`Except`) and a **pluggable adapter** (in-memory by default,
+  bring your own, e.g. Redis).
 - **Acknowledgements** on both the server and the client, with strongly
   typed handler signatures (no boilerplate casting).
 - **Binary events** (`BINARY_EVENT` / `BINARY_ACK`) transparently split into
-  attachments.
-- **Automatic reconnection** on the client with backoff, mirroring
-  `socket.io-client` behaviour.
+  attachments; `[]byte` and `io.Reader` payloads accepted on emit.
+- **Automatic reconnection** on the client with backoff (per-namespace auth
+  preserved across reconnects), mirroring `socket.io-client` behaviour.
+- **Server configuration** via `NewServerWithConfig`: mount path guard and
+  CORS (allow-all or explicit origin allow-list, polling + websocket).
+- **Error hooks** (`OnError` on server and client) and a **catch-all
+  `OnAny`** event hook on the server.
+- **Typed error sentinels** matchable with `errors.Is` (`ErrInvalidPacket`,
+  `ErrHeartbeatTimeout`, `ErrPayloadTooLarge`, `ErrNamespaceNotConnected`,
+  `ErrHandlerMismatch`).
+- **maxPayload truncation** drops overflow packets past the configured
+  buffer limit instead of killing the connection.
 - **Interoperability tested** against the official Node.js server and client.
 
 ## Installation
@@ -86,6 +98,16 @@ The client connects an extra namespace with `ConnectNamespace`:
 err := c.ConnectNamespace(ctx, "/admin", map[string]any{"token": "secret"})
 ```
 
+Namespaces are created lazily on first use. To register one explicitly
+ahead of time (e.g. so a factory-applied adapter is assigned to it):
+
+```go
+err := srv.RegisterNamespace("/admin")
+```
+
+`RegisterNamespace` returns an error for a malformed name (missing leading
+`/` or empty); registering the same namespace twice is a no-op.
+
 ### Middleware
 
 `Use` runs before a namespace connection is accepted. Return an error to
@@ -99,6 +121,26 @@ srv.Use("/admin", func(s *socketio.Socket, data map[string]any) error {
 	return nil
 })
 ```
+
+### Server configuration
+
+`NewServer` takes only engine options. Use `NewServerWithConfig` to also set
+a mount path guard and CORS rules:
+
+```go
+srv := socketio.NewServerWithConfig(&socketio.ServerConfig{
+	Engine: opts,                       // engineio.Options (nil = defaults)
+	Path:   "/socket.io",               // serve only under this prefix ("" = no guard)
+	CORS:   socketio.AllowAll(),        // or &CORSConfig{AllowedOrigins: []string{"https://app.example.com"}}
+})
+```
+
+- `Path` guards the handler: requests outside the prefix get `404`.
+- `CORS` applies when set: preflight `OPTIONS` is answered with the proper
+  headers, disallowed origins get `403`, and websocket upgrades check the
+  `Origin` header too.
+- `NewServer(opts)` is exactly `NewServerWithConfig(&ServerConfig{Engine: opts})`
+  and adds no path guard or CORS.
 
 ### Rooms
 
@@ -114,6 +156,22 @@ srv.OnEvent("/", "room message", func(s *socketio.Socket, room, text string) {
 `Server.BroadcastToRoom` includes the sender. A socket's own `To(room)`
 operator targets everyone in the room **except** the sender, matching the
 official `socket.to(room)` semantics.
+
+To broadcast to a room while excluding specific sockets, use `ToExcept`:
+
+```go
+// Server-level: exclude ids A and B from the room broadcast.
+srv.ToExcept("/", "room", []string{idA, idB}, "message", "hello")
+
+// Socket-level: excludes the sender plus any extra ids, like socket.to(room).except(ids).
+s.ToExcept("room", []string{idA}).Emit("message", "hello")
+
+// Or chain on the room operator directly.
+s.To("room").Except("idA").Emit("message", "hello")
+```
+
+`ToExcept` with an empty exclusion list behaves like `To(room)` /
+`BroadcastToRoom`.
 
 ## Client
 
@@ -175,7 +233,8 @@ The same applies to client handlers without the `*Socket` parameter. Non-nil
 ## Binary payloads
 
 Any value passed through an event or an acknowledgement is encoded as JSON.
-`[]byte` values are sent as binary attachments:
+`[]byte` values are sent as binary attachments. `io.Reader` values are also
+accepted and read to memory at emit time:
 
 ```go
 c.OnEvent("/", "download", func() []byte {
@@ -184,7 +243,88 @@ c.OnEvent("/", "download", func() []byte {
 srv.OnEvent("/", "download", func(s *socketio.Socket) []byte {
 	return []byte("file contents")
 })
+
+// Emitting an io.Reader is equivalent to emitting its []byte contents.
+srv.OnEvent("/", "upload", func(s *socketio.Socket, f *os.File) {
+	c.Emit("/", "upload", f)
+})
 ```
+
+An `io.Reader` that fails to read is dropped with a warning instead of
+corrupting the connection.
+
+## Error handling
+
+The package exposes typed sentinel errors that work with `errors.Is`:
+
+```go
+var (
+	// engineio layer
+	ErrInvalidPacket      // transport packet could not be decoded
+	ErrHeartbeatTimeout   // peer stopped answering pings
+	ErrPayloadTooLarge    // single polling packet exceeds maxPayload
+
+	// socketio layer
+	ErrNamespaceNotConnected // emit on a namespace the client never connected (wraps ErrNotConnected)
+	ErrHandlerMismatch       // handler signature does not match the event args
+)
+```
+
+`OnError` hooks receive dispatch failures (bad handler signatures, wrong
+argument types) instead of silently dropping them:
+
+```go
+// Server: the *Socket of the sender is provided.
+srv.OnError("/", func(s *socketio.Socket, err error) {
+	log.Printf("%s handler error: %v", s.ID(), err)
+})
+
+// Client: same hook without the socket.
+c.OnError("/", func(err error) {
+	log.Printf("handler error: %v", err)
+})
+```
+
+`OnAny` is a catch-all hook fired for every event (before the named handler):
+
+```go
+srv.OnAny("/", func(s *socketio.Socket, event string, args []any) {
+	log.Printf("%s -> %s %v", s.ID(), event, args)
+})
+```
+
+## Adapters
+
+Rooms and socket membership are backed by a pluggable `Adapter`. The default
+`NewMemoryAdapter` is a single-node in-memory implementation. Provide your
+own (e.g. backed by Redis) via `ServerConfig.Adapter` or `SetAdapterFactory`:
+
+```go
+type Adapter interface {
+	AddSocket(id string)
+	RemoveSocket(id string)
+	AddToRoom(room, id string)
+	RemoveFromRoom(room, id string)
+	Broadcast(room string, except []string, deliver func(id string))
+	Sockets() []string
+	SocketsCount() int
+	Close() error
+}
+
+type AdapterFactory func(nsp string) Adapter
+
+srv := socketio.NewServerWithConfig(&socketio.ServerConfig{
+	Adapter: func(nsp string) socketio.Adapter {
+		return myRedisAdapter(nsp)
+	},
+})
+// Or later — applies only to namespaces created after the call:
+srv.SetAdapterFactory(func(nsp string) socketio.Adapter {
+	return myRedisAdapter(nsp)
+})
+```
+
+`Server.Close()` calls `Close()` on every namespace's adapter.
 
 ## Interoperability
 
