@@ -1,6 +1,11 @@
 package engineio
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/kingecg/gosocketio/engineio/transport"
+)
 
 // Protocol error codes, mirroring the reference implementation.
 const (
@@ -32,4 +37,23 @@ var (
 
 	// ErrUnknownSID is returned when the sid is not known.
 	ErrUnknownSID = errors.New("engineio: session id unknown")
+
+	// ErrInvalidPacket is returned when a transport packet cannot be
+	// decoded. It wraps transport.ErrInvalidPacket, so errors.Is matches
+	// both this sentinel and the transport-level one.
+	ErrInvalidPacket = fmt.Errorf("%w: invalid packet", transport.ErrInvalidPacket)
+
+	// ErrHeartbeatTimeout is returned when the peer fails to answer a ping
+	// within the configured ping timeout.
+	ErrHeartbeatTimeout = errors.New("engineio: heartbeat timeout")
 )
+
+// wrapInvalidPacket rewraps a transport packet-decode error as
+// engineio.ErrInvalidPacket so that the engineio-level close surfaces the
+// engineio sentinel; other transport errors pass through unchanged.
+func wrapInvalidPacket(err error) error {
+	if errors.Is(err, transport.ErrInvalidPacket) {
+		return fmt.Errorf("%w: %v", ErrInvalidPacket, err)
+	}
+	return err
+}

@@ -221,7 +221,7 @@ func (s *Socket) onPacket(p *transport.Packet) {
 	case transport.Ping:
 		// clients of protocol v4 must not send ping packets
 		s.mu.Unlock()
-		s.closeWithReason("invalid heartbeat direction")
+		s.closeWithReason("invalid heartbeat direction", nil)
 	case transport.Message:
 		onData := s.onData
 		data := p.Data
@@ -232,7 +232,7 @@ func (s *Socket) onPacket(p *transport.Packet) {
 		}
 	case transport.Close:
 		s.mu.Unlock()
-		s.closeWithReason("client close")
+		s.closeWithReason("client close", nil)
 	default:
 		s.mu.Unlock()
 	}
@@ -250,7 +250,7 @@ func (s *Socket) onErrorFrom(t transport.Transport, err error) {
 		return
 	}
 	s.logger.Debugf("engineio[%s]: transport error: %v", s.id, err)
-	s.closeWithReason("transport error")
+	s.closeWithReason("transport error", wrapInvalidPacket(err))
 }
 
 func (s *Socket) onCloseFrom(t transport.Transport) {
@@ -261,7 +261,7 @@ func (s *Socket) onCloseFrom(t transport.Transport) {
 	if !active || upgrading {
 		return
 	}
-	s.closeWithReason("transport close")
+	s.closeWithReason("transport close", nil)
 }
 
 func (s *Socket) schedulePing() {
@@ -297,7 +297,7 @@ func (s *Socket) pingTimeoutHandler() {
 		return
 	}
 	s.mu.Unlock()
-	s.closeWithReason("ping timeout")
+	s.closeWithReason("ping timeout", ErrHeartbeatTimeout)
 }
 
 // Close closes the socket gracefully: pending packets are flushed and a
@@ -326,7 +326,7 @@ func (s *Socket) closeTransport() {
 // closeWithReason tears the session down and notifies the server once.
 // It is reentrancy-safe: transport close events triggered from within the
 // cleanup see the session already closed and return immediately.
-func (s *Socket) closeWithReason(reason string) {
+func (s *Socket) closeWithReason(reason string, err error) {
 	s.mu.Lock()
 	if s.readyState == stateClosed {
 		s.mu.Unlock()
@@ -348,7 +348,7 @@ func (s *Socket) closeWithReason(reason string) {
 		tport.Close()
 	}
 	if onClose != nil {
-		onClose(s, reason, nil)
+		onClose(s, reason, err)
 	}
 }
 

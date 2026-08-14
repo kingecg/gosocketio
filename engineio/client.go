@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sync"
@@ -427,7 +428,7 @@ func (c *Client) resetNoPingTimeout() {
 		c.noPingTimeoutTimer.Stop()
 	}
 	c.noPingTimeoutTimer = time.AfterFunc(interval+timeout, func() {
-		c.closeWithError(errors.New("engineio: ping timeout"))
+		c.closeWithError(fmt.Errorf("%w: ping timeout", ErrHeartbeatTimeout))
 	})
 	c.mu.Unlock()
 }
@@ -463,7 +464,7 @@ func (c *Client) onErrorFrom(t transport.Transport, err error) {
 		return
 	}
 	logger.Debugf("engineio: transport error: %v", err)
-	c.closeWithError(err)
+	c.closeWithError(wrapInvalidPacket(err))
 }
 
 func (c *Client) onCloseFrom(t transport.Transport) {
