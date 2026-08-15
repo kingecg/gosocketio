@@ -24,6 +24,11 @@ type namespace struct {
 	onError     []reflect.Value
 	onAny       []reflect.Value
 	events      map[string][]reflect.Value
+
+	// unknownAck is the acknowledgement data returned for EVENT packets
+	// that carry an ack id but have no registered handler. nil falls back
+	// to an empty ack payload (the historical behaviour).
+	unknownAck []any
 }
 
 func newNamespace(server *Server, name string) *namespace {
@@ -85,6 +90,23 @@ func (n *namespace) OnEvent(event string, f any) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.events[event] = append(n.events[event], v)
+}
+
+// SetUnknownEventAck sets the acknowledgement payload returned for EVENT
+// packets that carry an ack id but match no registered handler. nil (the
+// default) keeps the historical behaviour of acknowledging with an empty
+// payload.
+func (n *namespace) SetUnknownEventAck(data []any) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.unknownAck = append([]any(nil), data...)
+}
+
+// unknownEventAck returns a copy of the configured unknown-event ack payload.
+func (n *namespace) unknownEventAck() []any {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.unknownAck
 }
 
 // Use registers a connection middleware.

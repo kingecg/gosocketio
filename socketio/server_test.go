@@ -291,6 +291,25 @@ func TestAckWithoutHandler(t *testing.T) {
 	}
 }
 
+func TestUnknownEventAck(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetUnknownEventAck("/", []any{"ok"})
+	ts := startTestServer(t, srv)
+
+	tc := newTestClient(t, ts.URL)
+	tc.send("0")
+	tc.recvPacket(testWait)
+
+	tc.send(`21["nobody","x"]`)
+	p := tc.recvPacket(testWait)
+	if p.Type != Ack || p.ID != 1 {
+		t.Fatalf("got %v id=%d", p.Type, p.ID)
+	}
+	if !reflect.DeepEqual(p.Data, []any{"ok"}) {
+		t.Fatalf("expected ['ok'] ack, got %#v", p.Data)
+	}
+}
+
 func TestNamespace(t *testing.T) {
 	srv := newTestServer(t)
 	srv.OnEvent("/admin", "ping", func(s *Socket, m string) string {

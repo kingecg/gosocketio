@@ -61,12 +61,20 @@ func invokeHandler(h reflect.Value, s *Socket, args []any) ([]any, error) {
 //	func(a string)
 //	func(a int, b map[string]any)
 //	func(a *T)
+//	func(args ...any)   // all remaining arguments packed into the variadic slice
+//	func(a string, rest ...any)
 //	... with zero or more return values used as the ack payload.
 func invokeClientHandler(h reflect.Value, args []any) ([]any, error) {
 	ht := h.Type()
 	numIn := ht.NumIn()
 	in := make([]reflect.Value, numIn)
-	for i := 0; i < numIn; i++ {
+	// Fixed leading parameters map to the first event arguments; a trailing
+	// variadic parameter receives every remaining argument as one slice.
+	fixed := numIn
+	if ht.IsVariadic() {
+		fixed = numIn - 1
+	}
+	for i := 0; i < fixed; i++ {
 		if i < len(args) {
 			v, ok := convertArg(args[i], ht.In(i))
 			if !ok {
@@ -76,6 +84,21 @@ func invokeClientHandler(h reflect.Value, args []any) ([]any, error) {
 		} else {
 			in[i] = reflect.Zero(ht.In(i))
 		}
+	}
+	if ht.IsVariadic() {
+		vt := ht.In(fixed)
+		rest := args[fixed:]
+		slice := reflect.MakeSlice(vt, len(rest), len(rest))
+		for j, a := range rest {
+			v, ok := convertArg(a, vt.Elem())
+			if !ok {
+				return nil, ErrHandlerMismatch
+			}
+			slice.Index(j).Set(v)
+		}
+		in[fixed] = slice
+		outs := h.CallSlice(in)
+		return collectResults(outs), nil
 	}
 	outs := h.Call(in)
 	return collectResults(outs), nil

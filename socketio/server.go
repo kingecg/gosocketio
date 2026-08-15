@@ -317,6 +317,14 @@ func (s *Server) OnAny(nsp string, f func(*Socket, string, []any)) {
 	s.namespaceFor(nsp).OnAny(f)
 }
 
+// SetUnknownEventAck sets the acknowledgement payload returned for EVENT
+// packets that carry an ack id but match no registered handler in the
+// namespace. nil (the default) keeps the historical behaviour of
+// acknowledging with an empty payload.
+func (s *Server) SetUnknownEventAck(nsp string, data []any) {
+	s.namespaceFor(nsp).SetUnknownEventAck(data)
+}
+
 // Use registers a connection middleware for a namespace.
 func (s *Server) Use(nsp string, m Middleware) {
 	s.namespaceFor(nsp).Use(m)
@@ -701,6 +709,9 @@ func (s *Server) handleEvent(ec *engineConn, pkt *Packet) {
 	if pkt.ID >= 0 {
 		go func() {
 			wg.Wait()
+			if results == nil {
+				results = sock.nsp.unknownEventAck()
+			}
 			if results == nil {
 				results = []any{}
 			}
